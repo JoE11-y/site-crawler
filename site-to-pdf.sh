@@ -24,6 +24,8 @@
 #       --no-body-first    Plain breadth-first crawl
 #       --content-only     Reader mode: extract main content, drop chrome/styling (needs Python)
 #       --select SEL       Follow only links inside section(s) SEL: tag/.class/#id/bare (needs Python)
+#       --proxy URL        Route Chrome + curl/wget through a proxy (e.g. corporate)
+#       --insecure, -k     Ignore TLS certificate errors (QA / intercepting proxies)
 #       --debug            Show child stderr (Chrome, Python helpers) for troubleshooting
 #   -h, --help             Show this help and exit
 # -----------------------------------------------------------------------------
@@ -45,6 +47,8 @@ CONTENT_ONLY="no"
 SELECT=""
 DEBUG="no"
 ERR_SINK="/dev/null"      # where child stderr goes; /dev/stderr under --debug
+PROXY=""                  # proxy for Chrome + curl (only when --proxy is given)
+INSECURE="no"             # --insecure: ignore TLS cert errors (QA / intercepting proxies)
 START_URL=""
 
 # Basic-Auth creds from env (not flags); NOTE: still visible in `ps` via Chrome/curl children.
@@ -194,6 +198,8 @@ while [ $# -gt 0 ]; do
     --no-body-first)       BODY_FIRST="no"; shift ;;
     --content-only|--reader) CONTENT_ONLY="yes"; shift ;;
     --select|--section|--target) SELECT="$2"; shift 2 ;;
+    --proxy)               PROXY="$2"; shift 2 ;;
+    --insecure|-k)         INSECURE="yes"; shift ;;
     --debug)               DEBUG="yes"; shift ;;
     -h|--help)             usage ;;
     -*)                    die "Unknown option: $1 (try --help)" ;;
@@ -202,6 +208,7 @@ while [ $# -gt 0 ]; do
 done
 
 [ "$DEBUG" = "yes" ] && ERR_SINK="/dev/stderr"   # --debug: surface child stderr
+CURL_EXTRA=(); WGET_EXTRA=()                     # filled in by setup_net (after proxy detect)
 
 # ----------------------- pick a random start URL if none ---------------------
 if [ -z "$START_URL" ]; then
@@ -242,11 +249,18 @@ case "$PLATFORM" in
 esac
 
 # ---------------------- download / unzip abstractions ------------------------
+# Build curl/wget options from --proxy / --insecure (no auto-detection).
+setup_net() {
+  CURL_EXTRA=(); WGET_EXTRA=()
+  [ -n "$PROXY" ] && { CURL_EXTRA+=(-x "$PROXY"); WGET_EXTRA+=(-e use_proxy=yes -e "https_proxy=$PROXY" -e "http_proxy=$PROXY"); }
+  [ "$INSECURE" = "yes" ] && { CURL_EXTRA+=(-k); WGET_EXTRA+=(--no-check-certificate); }
+}
+
 fetch() {  # fetch <url> <outfile>
   if command -v curl >/dev/null 2>&1; then
-    curl -fsSL --retry 3 -o "$2" "$1"
+    curl -fsSL --retry 3 ${CURL_EXTRA[@]+"${CURL_EXTRA[@]}"} -o "$2" "$1"
   elif command -v wget >/dev/null 2>&1; then
-    wget -q -O "$2" "$1"
+    wget -q ${WGET_EXTRA[@]+"${WGET_EXTRA[@]}"} -O "$2" "$1"
   else
     die "Need curl or wget to download dependencies, found neither."
   fi
@@ -255,9 +269,9 @@ fetch() {  # fetch <url> <outfile>
 # Like fetch() but shows a download progress bar (for large files).
 fetch_progress() {  # fetch_progress <url> <outfile>
   if command -v curl >/dev/null 2>&1; then
-    curl -fL --retry 3 --progress-bar -o "$2" "$1"
+    curl -fL --retry 3 --progress-bar ${CURL_EXTRA[@]+"${CURL_EXTRA[@]}"} -o "$2" "$1"
   elif command -v wget >/dev/null 2>&1; then
-    wget --progress=bar:force -O "$2" "$1"
+    wget --progress=bar:force ${WGET_EXTRA[@]+"${WGET_EXTRA[@]}"} -O "$2" "$1"
   else
     die "Need curl or wget to download dependencies, found neither."
   fi
@@ -265,9 +279,9 @@ fetch_progress() {  # fetch_progress <url> <outfile>
 
 fetch_stdout() {  # fetch_stdout <url>
   if command -v curl >/dev/null 2>&1; then
-    curl -fsSL --retry 3 "$1"
+    curl -fsSL --retry 3 ${CURL_EXTRA[@]+"${CURL_EXTRA[@]}"} "$1"
   elif command -v wget >/dev/null 2>&1; then
-    wget -q -O - "$1"
+    wget -q ${WGET_EXTRA[@]+"${WGET_EXTRA[@]}"} -O - "$1"
   else
     die "Need curl or wget to download dependencies, found neither."
   fi
@@ -278,9 +292,9 @@ fetch_auth() {  # fetch_auth <url> <outfile> <user> <pass>
   local url="$1" out="$2" u="$3" p="$4"
   if [ -n "$u" ]; then
     if command -v curl >/dev/null 2>&1; then
-      curl -fsSL --retry 3 -u "$u:$p" -o "$out" "$url"; return
+      curl -fsSL --retry 3 ${CURL_EXTRA[@]+"${CURL_EXTRA[@]}"} -u "$u:$p" -o "$out" "$url"; return
     elif command -v wget >/dev/null 2>&1; then
-      wget -q --user="$u" --password="$p" -O "$out" "$url"; return
+      wget -q ${WGET_EXTRA[@]+"${WGET_EXTRA[@]}"} --user="$u" --password="$p" -O "$out" "$url"; return
     fi
   fi
   fetch "$url" "$out"
@@ -921,6 +935,8 @@ build_flags() {
     *chrome-headless-shell*) : ;;
     *) CHROME_FLAGS=(--headless=new "${CHROME_FLAGS[@]}") ;;
   esac
+  [ -n "$PROXY" ] && CHROME_FLAGS+=("--proxy-server=$PROXY")
+  [ "$INSECURE" = "yes" ] && CHROME_FLAGS+=(--ignore-certificate-errors)
 }
 
 # Render a URL to PDF. Returns 0 on success.
@@ -1103,6 +1119,8 @@ main() {
   log "Start URL : $START_URL"
   log "Max pages : $MAX_PAGES   Max depth: $MAX_DEPTH   Delay: ${DELAY}s"
 
+  setup_net   # build curl/wget opts from --proxy / --insecure
+
   # ----- preflight: hard requirements (clean message + exit if unmet) -----
   if [ "$USE_SYSTEM_CHROME" != "yes" ] || [ "$DOWNLOAD_IMAGES" = "yes" ]; then
     if ! command -v curl >/dev/null 2>&1 && ! command -v wget >/dev/null 2>&1; then
@@ -1216,6 +1234,8 @@ main() {
   fi
 
   [ -n "$AUTH_USER" ] && log "Basic-Auth enabled for host '$host' (user: $AUTH_USER)"
+  [ -n "$PROXY" ] && log "Proxy: $PROXY"
+  [ "$INSECURE" = "yes" ] && log "TLS certificate verification disabled (--insecure)"
 
   # ----- crawl -----
   # Seed the high-priority (content) frontier with the start URL.
