@@ -24,6 +24,7 @@
 #       --no-body-first    Plain breadth-first crawl
 #       --content-only     Reader mode: extract main content, drop chrome/styling (needs Python)
 #       --select SEL       Follow only links inside section(s) SEL: tag/.class/#id/bare (needs Python)
+#       --debug            Show child stderr (Chrome, Python helpers) for troubleshooting
 #   -h, --help             Show this help and exit
 # -----------------------------------------------------------------------------
 
@@ -42,6 +43,8 @@ IMAGES_SAME_HOST="no"
 BODY_FIRST="yes"
 CONTENT_ONLY="no"
 SELECT=""
+DEBUG="no"
+ERR_SINK="/dev/null"      # where child stderr goes; /dev/stderr under --debug
 START_URL=""
 
 # Basic-Auth creds from env (not flags); NOTE: still visible in `ps` via Chrome/curl children.
@@ -185,11 +188,14 @@ while [ $# -gt 0 ]; do
     --no-body-first)       BODY_FIRST="no"; shift ;;
     --content-only|--reader) CONTENT_ONLY="yes"; shift ;;
     --select|--section|--target) SELECT="$2"; shift 2 ;;
+    --debug)               DEBUG="yes"; shift ;;
     -h|--help)             usage ;;
     -*)                    die "Unknown option: $1 (try --help)" ;;
     *)                     [ -z "$START_URL" ] && START_URL="$1" || die "Unexpected argument: $1"; shift ;;
   esac
 done
+
+[ "$DEBUG" = "yes" ] && ERR_SINK="/dev/stderr"   # --debug: surface child stderr
 
 # ----------------------- pick a random start URL if none ---------------------
 if [ -z "$START_URL" ]; then
@@ -917,7 +923,7 @@ render_pdf() {  # render_pdf <url> <outfile>
     --no-pdf-header-footer \
     --print-to-pdf="$2" \
     --virtual-time-budget="$RENDER_BUDGET_MS" \
-    "$(auth_url "$1")" >/dev/null 2>&1
+    "$(auth_url "$1")" >/dev/null 2>"$ERR_SINK"
   [ -s "$2" ]
 }
 
@@ -928,7 +934,7 @@ render_local_pdf() {  # render_local_pdf <html_file> <outfile>
     --no-pdf-header-footer \
     --print-to-pdf="$2" \
     --virtual-time-budget="$RENDER_BUDGET_MS" \
-    "$furl" >/dev/null 2>&1
+    "$furl" >/dev/null 2>"$ERR_SINK"
   [ -s "$2" ]
 }
 
@@ -940,18 +946,20 @@ build_pdf_snapshot() {  # build_pdf_snapshot <mode> <url> <dom_file> <pdf_out>
   local html="$pages_dir/$(printf '%04d' "$count")_$(slugify "$url").html"
   local mapping; mapping="$(mktemp 2>/dev/null || echo "$PROFILE_DIR/map.$count")"
 
-  local rc
+  local rc errlog; errlog="$(mktemp 2>/dev/null || echo "$PROFILE_DIR/pyerr.$count")"
   if [ "$mode" = "content" ]; then
     local wi=0; [ "$DOWNLOAD_IMAGES" = "yes" ] && wi=1
-    "$PYBIN" "$(pypath "$CONTENT_PY")" "$url" "$(pypath "$mapping")" "$wi" < "$dom" > "$html" 2>/dev/null; rc=$?
+    "$PYBIN" "$(pypath "$CONTENT_PY")" "$url" "$(pypath "$mapping")" "$wi" < "$dom" > "$html" 2>"$errlog"; rc=$?
   else
-    "$PYBIN" "$(pypath "$REWRITER_PY")" "$url" "$(auth_url "$url")" "$(pypath "$mapping")" < "$dom" > "$html" 2>/dev/null; rc=$?
+    "$PYBIN" "$(pypath "$REWRITER_PY")" "$url" "$(auth_url "$url")" "$(pypath "$mapping")" < "$dom" > "$html" 2>"$errlog"; rc=$?
   fi
   if [ "$rc" -ne 0 ]; then
-    warn "  snapshot generation failed; rendering live instead"
-    rm -f "$mapping"
+    warn "  snapshot generation failed (python exit $rc); rendering live instead"
+    [ -s "$errlog" ] && sed 's/^/      | /' "$errlog" >&2   # show the real Python error
+    rm -f "$errlog" "$mapping"
     render_pdf "$url" "$pdf"; return
   fi
+  rm -f "$errlog"
 
   # Download each image; collect token->path substitutions for one sed pass later.
   local id absurl ext rel abspath repl esc cu cp got=0 tab total n=0
@@ -1000,7 +1008,7 @@ dump_dom() {  # dump_dom <url>
   "$CHROME" "${CHROME_FLAGS[@]}" \
     --dump-dom \
     --virtual-time-budget="$RENDER_BUDGET_MS" \
-    "$(auth_url "$1")" 2>/dev/null
+    "$(auth_url "$1")" 2>"$ERR_SINK"
 }
 
 # Extract href values from <a> anchors only (skips <link>/<script> assets).
@@ -1124,7 +1132,7 @@ main() {
   build_flags
 
   # Smoke-test the browser; fall back to a system one if it can't launch.
-  if ! "$CHROME" "${CHROME_FLAGS[@]}" --dump-dom "data:text/html,<title>t</title>" >/dev/null 2>&1; then
+  if ! "$CHROME" "${CHROME_FLAGS[@]}" --dump-dom "data:text/html,<title>t</title>" >/dev/null 2>"$ERR_SINK"; then
     warn "Downloaded browser failed to launch (often missing system libraries on Linux)."
     if sysc="$(find_system_chrome)"; then
       warn "Falling back to system browser: $sysc"
@@ -1259,7 +1267,7 @@ main() {
     # Isolate the targeted section (scopes link discovery, not extraction).
     if [ -n "$SELECT" ] && [ -n "$dom" ]; then
       region_dom="$(mktemp 2>/dev/null || echo "$PROFILE_DIR/region.$count")"
-      if ! "$PYBIN" "$(pypath "$SELECT_PY")" "${SELECT_ARGS[@]}" < "$dom" > "$region_dom" 2>/dev/null; then
+      if ! "$PYBIN" "$(pypath "$SELECT_PY")" "${SELECT_ARGS[@]}" < "$dom" > "$region_dom" 2>"$ERR_SINK"; then
         rm -f "$region_dom"; region_dom=""
       fi
     fi
@@ -1299,7 +1307,7 @@ EOF
         # Content frontier = links from the body (header/nav/footer stripped).
         local content_dom
         content_dom="$(mktemp 2>/dev/null || echo "$PROFILE_DIR/links.$count")"
-        if "$PYBIN" "$(pypath "$STRIPPER_PY")" $STRIP_SPEC < "$dom" > "$content_dom" 2>/dev/null; then
+        if "$PYBIN" "$(pypath "$STRIPPER_PY")" $STRIP_SPEC < "$dom" > "$content_dom" 2>"$ERR_SINK"; then
           enqueue_links content "$url" "$nd" <<EOF
 $(extract_links "$url" "$content_dom")
 EOF
