@@ -231,8 +231,13 @@ CRAWL_USER='alice' CRAWL_PASS='s3cret!' ./site-to-pdf.sh https://intranet.exampl
 | `CRAWL_PASS` | Password sent to the target host         |
 
 Credentials are passed to Chrome (for page rendering and same-host subresources)
-and to `curl`/`wget` (for image downloads). Using environment variables — rather
-than a command-line flag — keeps the password out of the process list.
+and to `curl`/`wget` (for image downloads). Using environment variables keeps the
+password out of your shell history and out of this script's own arguments.
+
+> **Note:** the password is still handed to the Chrome child process (embedded
+> in the URL) and to `curl`/`wget` (via `-u`), so it **can appear in the system
+> process list** (e.g. `ps`, `/proc/<pid>/cmdline`) while those children run.
+> Avoid using credential env vars on shared/multi-user machines.
 
 > Note: this only covers HTTP Basic Auth (the native browser popup). Form-based
 > login pages (an HTML `<form>` with username/password fields) are **not**

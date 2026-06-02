@@ -2,62 +2,29 @@
 #
 # site-to-pdf.sh
 # -----------------------------------------------------------------------------
-# Crawl a website with a headless Chrome and convert every reachable page
-# (same host, within a depth/page limit) into PDF files, then optionally merge
-# them into a single PDF.
+# Crawl a site with headless Chrome and save its pages as PDFs (optional merge).
+# Self-contained: downloads its own Chrome for Testing into .cache/. Runs on
+# Linux, macOS and Windows (Git Bash); avoids bash 4+ features (macOS bash 3.2).
 #
-# Self-contained: it DOWNLOADS its own dependencies and does not assume the
-# runner has Chrome installed. Specifically it fetches Google's official
-# "Chrome for Testing" chrome-headless-shell binary for the current OS/arch
-# into a local .cache/ directory.
-#
-# Works on Linux, macOS and Windows (Git Bash / MSYS2).
-# Avoids bash 4+ features so it also runs on macOS's stock bash 3.2.
-#
-# Usage:
-#   ./site-to-pdf.sh [URL] [options]
-#
-# If URL is omitted, a random demo site is picked.
-#
-# Environment variables (for sites protected by an HTTP Basic-Auth popup):
-#   CRAWL_USER   username to send to the target host
-#   CRAWL_PASS   password to send to the target host
-# e.g.   CRAWL_USER=alice CRAWL_PASS='s3cret' ./site-to-pdf.sh https://intranet.example.com
-# Credentials are ONLY ever sent to the start host, never to third-party hosts.
+# Usage: ./site-to-pdf.sh [URL] [options]    (no URL -> a random demo site)
+# Env (HTTP Basic-Auth popup): CRAWL_USER, CRAWL_PASS -- sent only to start host.
 #
 # Options:
-#   -n, --max-pages N    Maximum number of pages to crawl   (default 25)
-#   -d, --depth N        Maximum crawl depth from start URL  (default 2)
-#   -o, --out DIR        Output directory                    (default ./output/<host>-<timestamp>)
-#       --delay SEC      Delay between page loads in seconds (default 0.5)
-#       --merge          Merge page PDFs into one file        (default: on if a merger is available)
-#       --no-merge       Keep individual per-page PDFs only
-#       --use-system-chrome  Skip download, use a Chrome/Chromium found on PATH
-#       --timeout MS     Per-page render budget in ms        (default 12000)
-#       --no-images      Do NOT download images / skip image slot-back (default: on)
-#       --images-same-host  Only download images served by the start host
-#       --body-first     Crawl body/content links first; only descend into
-#                        <header>/<nav> links once all content is exhausted.
-#                        This is the DEFAULT (needs Python; falls back to plain
-#                        breadth-first crawl if Python is unavailable).
-#       --no-body-first  Disable the priority above; plain breadth-first crawl.
-#       --content-only   Reader mode: extract just the page's main content
-#                        (headings, text, lists, tables, content images) into a
-#                        clean PDF instead of a full visual copy of the site.
-#                        Drops header/nav/footer and site styling. (needs Python)
-#       --select SEL     Follow only links found inside the section(s) matching
-#                        SEL (scopes crawling; each PDF still holds the page's
-#                        main content). SEL is one or more (comma-separated) of:
-#                        tagname, .class, #id -- a bare word also matches a
-#                        class/id. e.g. --select sidebar  or  --select 'aside,#toc'
-#                        (needs Python)
-#
-# Image handling: by default each page's <img> sources are downloaded into
-# images/ and slotted back into the PDF by id (a local snapshot is saved under
-# pages/ and printed), so the PDF embeds our own downloaded copies in place.
-# This needs Python; without it the script renders the live page (Chrome still
-# paints the images) and keeps images/ as a separate archive.
-#   -h, --help           Show this help and exit
+#   -n, --max-pages N      Max pages to crawl (default 25)
+#   -d, --depth N          Max crawl depth (default 2)
+#   -o, --out DIR          Output dir (default ./output/<host>-<timestamp>)
+#       --delay SEC        Delay between page loads (default 0.5)
+#       --merge            Merge page PDFs into one file (default if a merger exists)
+#       --no-merge         Keep individual per-page PDFs only
+#       --use-system-chrome  Use a Chrome/Chromium on PATH instead of downloading
+#       --timeout MS       Per-page render budget in ms (default 12000)
+#       --no-images        Do not download images / skip image slot-back
+#       --images-same-host Only download images served by the start host
+#       --body-first       Crawl content links before header/nav/footer (default; needs Python)
+#       --no-body-first    Plain breadth-first crawl
+#       --content-only     Reader mode: extract main content, drop chrome/styling (needs Python)
+#       --select SEL       Follow only links inside section(s) SEL: tag/.class/#id/bare (needs Python)
+#   -h, --help             Show this help and exit
 # -----------------------------------------------------------------------------
 
 set -u
@@ -77,21 +44,18 @@ CONTENT_ONLY="no"
 SELECT=""
 START_URL=""
 
-# HTTP Basic-Auth credentials come from the environment so they never appear in
-# the command line / process list under a guessable flag name.
+# Basic-Auth creds from env (not flags); NOTE: still visible in `ps` via Chrome/curl children.
 AUTH_USER="${CRAWL_USER:-}"
 AUTH_PASS="${CRAWL_PASS:-}"
 
-# A few harmless public sites used when no URL is supplied ("random site").
+# Used when no URL is supplied ("random site").
 RANDOM_SITES="https://example.com https://books.toscrape.com https://quotes.toscrape.com https://www.iana.org"
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 CACHE_DIR="$SCRIPT_DIR/.cache"
 CFT_JSON_URL="https://googlechromelabs.github.io/chrome-for-testing/last-known-good-versions-with-downloads.json"
 
-# Python is used to rewrite page HTML so downloaded images are slotted back in
-# by id before printing. If it's unavailable we fall back to live rendering
-# (Chrome still paints the images, just not from our local copies).
+# Python powers image slot-back, content/reader mode and section select; optional.
 PYBIN=""
 command -v python3 >/dev/null 2>&1 && PYBIN="python3"
 [ -z "$PYBIN" ] && command -v python >/dev/null 2>&1 && PYBIN="python"
@@ -107,10 +71,7 @@ warn() { printf '\033[33m[!]\033[0m %s\n' "$*" >&2; }
 err()  { printf '\033[31m[x]\033[0m %s\n' "$*" >&2; }
 die()  { err "$@"; exit 1; }
 
-# --- dependency guidance -----------------------------------------------------
-# Print the best install command for a logical dependency, based on whichever
-# package manager is available (falls back to a download link). Used to tell the
-# user exactly how to enable a feature we can't install for them.
+# Best install command for a dependency, per detected package manager.
 install_hint() {  # install_hint <dep: python|curl|wget|unzip|poppler>
   local dep="$1" apt dnf pac brew win
   case "$dep" in
@@ -151,13 +112,10 @@ missing_required() {  # missing_required <dep> <why>
   exit 1
 }
 
-# --- progress / live status -------------------------------------------------
-# Only animate when stderr is an interactive terminal; otherwise stay quiet so
-# piped/redirected logs remain clean.
+# --- progress / live status (animate only on an interactive terminal) --------
 is_tty() { [ -t 2 ]; }
 
-# Transient single-line status (overwritten by the next status/clear). No-op
-# when not a TTY.
+# Transient single-line status, overwritten by the next status/clear (TTY only).
 status() {  # status <text>
   is_tty && printf '\r\033[K\033[2m%s\033[0m' "$*" >&2
 }
@@ -166,9 +124,7 @@ status_clear() { is_tty && printf '\r\033[K' >&2; }
 # mm:ss from a number of seconds
 fmt_time() { printf '%d:%02d' $(( $1 / 60 )) $(( $1 % 60 )); }
 
-# SIGINT handler: one Ctrl-C skips the page being processed; two within ~1s
-# stops the whole crawl gracefully (partial results are kept). The handler only
-# sets flags -- the loop acts on them -- so the script is never hard-killed.
+# SIGINT: one tap sets SKIP_CURRENT, quick double-tap sets ABORT (loop acts on flags).
 on_interrupt() {
   if [ "$(( SECONDS - LAST_INT ))" -le 1 ]; then
     ABORT=1
@@ -182,8 +138,7 @@ on_interrupt() {
   LAST_INT=$SECONDS
 }
 
-# Run a command while showing a spinner + elapsed seconds. Returns the
-# command's exit code. Falls back to a plain log line when not a TTY.
+# Run a command showing a spinner + elapsed seconds; returns its exit code.
 run_spin() {  # run_spin <message> <command> [args...]
   local msg="$1"; shift
   if ! is_tty; then
@@ -204,7 +159,12 @@ run_spin() {  # run_spin <message> <command> [args...]
 }
 
 usage() {
-  sed -n '2,60p' "$0" | sed 's/^# \{0,1\}//; s/^#$//'
+  # Print the header block between the two "# -----" rules, minus the "# ".
+  awk '
+    /^# -{5,}/ { n++; next }
+    n == 1     { line = $0; sub(/^# ?/, "", line); print line }
+    n >= 2     { exit }
+  ' "$0"
   exit 0
 }
 
@@ -319,10 +279,8 @@ extract_zip() {  # extract_zip <zipfile> <destdir>
   mkdir -p "$dest"
   if command -v unzip >/dev/null 2>&1; then
     unzip -q -o "$zip" -d "$dest"
-  elif command -v python3 >/dev/null 2>&1; then
-    python3 -c 'import sys,zipfile; zipfile.ZipFile(sys.argv[1]).extractall(sys.argv[2])' "$zip" "$dest"
-  elif command -v python >/dev/null 2>&1; then
-    python  -c 'import sys,zipfile; zipfile.ZipFile(sys.argv[1]).extractall(sys.argv[2])' "$zip" "$dest"
+  elif [ -n "$PYBIN" ]; then
+    "$PYBIN" -c 'import sys,zipfile; zipfile.ZipFile(sys.argv[1]).extractall(sys.argv[2])' "$zip" "$dest"
   elif command -v tar >/dev/null 2>&1; then
     # Windows' built-in tar (bsdtar) and macOS tar can extract .zip archives.
     tar -xf "$zip" -C "$dest"
@@ -357,8 +315,7 @@ download_chrome() {
   local json url zip
   json="$(fetch_stdout "$CFT_JSON_URL")" || die "Could not fetch Chrome for Testing version index."
 
-  # The download URLs contain the platform and binary name, so a plain grep is
-  # enough and we avoid a hard dependency on jq. First match = Stable channel.
+  # URLs embed platform + binary name, so grep avoids a jq dependency (first = Stable).
   url="$(printf '%s' "$json" \
         | grep -oE 'https://[^"]*chrome-headless-shell-'"$PLATFORM"'\.zip' \
         | head -n1)"
@@ -402,8 +359,7 @@ url_dir() {
   esac
 }
 
-# Resolve a possibly-relative href against a base URL -> absolute URL (or empty
-# if it should be skipped).
+# Resolve a possibly-relative href against a base URL -> absolute URL (or empty).
 resolve_url() {
   local base="$1" href="$2"
   href="${href%%#*}"                       # strip fragment
@@ -415,6 +371,29 @@ resolve_url() {
     /*)   echo "$(url_origin "$base")$href" ; return ;;      # root-relative
     *)    echo "$(url_dir "$base")$href" ; return ;;         # document-relative
   esac
+}
+
+# Canonicalise a URL so variants dedupe (drop fragment, lowercase host, strip default port/trailing slash).
+normalize_url() {  # normalize_url <abs_url>
+  local u="$1" base query scheme rest host path
+  u="${u%%#*}"
+  case "$u" in *\?*) base="${u%%\?*}"; query="?${u#*\?}" ;; *) base="$u"; query="" ;; esac
+  case "$base" in
+    http://*)  scheme="http://";  rest="${base#http://}" ;;
+    https://*) scheme="https://"; rest="${base#https://}" ;;
+    *) printf '%s' "$1"; return ;;
+  esac
+  case "$rest" in
+    */*) host="${rest%%/*}"; path="/${rest#*/}" ;;
+    *)   host="$rest"; path="/" ;;
+  esac
+  host="$(printf '%s' "$host" | tr 'A-Z' 'a-z')"
+  case "$scheme$host" in
+    http://*:80)   host="${host%:80}" ;;
+    https://*:443) host="${host%:443}" ;;
+  esac
+  [ "$path" != "/" ] && path="${path%/}"
+  printf '%s%s%s%s' "$scheme" "$host" "$path" "$query"
 }
 
 # Percent-encode a string so it is safe to embed in a URL (for credentials).
@@ -431,8 +410,7 @@ urlencode() {
   printf '%s' "$out"
 }
 
-# Return the URL with Basic-Auth credentials embedded, but ONLY when creds are
-# set and the URL targets the start host. Otherwise return the URL unchanged.
+# Embed Basic-Auth creds in the URL, but only when set and targeting the start host.
 auth_url() {  # auth_url <url>
   local u="$1"
   [ -z "$AUTH_USER" ] && { printf '%s' "$u"; return; }
@@ -449,8 +427,7 @@ slugify() {
     | cut -c1-80
 }
 
-# Convert an absolute filesystem path into a file:// URL Chrome understands,
-# handling Windows (Git Bash) paths via cygpath.
+# Absolute filesystem path -> file:// URL Chrome understands (cygpath on Windows).
 to_file_url() {  # to_file_url <abs_path>
   local p="$1"
   if command -v cygpath >/dev/null 2>&1; then
@@ -460,18 +437,7 @@ to_file_url() {  # to_file_url <abs_path>
   fi
 }
 
-# Replace every occurrence of a placeholder token in a file with a value
-# (portable in-place edit; escapes sed-special chars in the replacement).
-slot_replace() {  # slot_replace <token> <replacement> <file>
-  local token="$1" repl="$2" file="$3" tmp esc
-  tmp="$(mktemp 2>/dev/null || echo "$file.tmp")"
-  esc="$(printf '%s' "$repl" | sed -e 's/[\\&|]/\\&/g')"
-  sed "s|$token|$esc|g" "$file" > "$tmp" && mv "$tmp" "$file"
-}
-
-# Write out the Python helper that swaps <img> sources for placeholder ids and
-# makes other resource URLs absolute (so CSS/JS still load when we render the
-# saved snapshot offline).
+# Python helper (mirror mode): tokenise <img> src to CRAWLIMG_ ids; absolutise other resource URLs.
 write_rewriter() {  # write_rewriter <path>
   cat > "$1" <<'PYEOF'
 import sys, re, os
@@ -555,12 +521,7 @@ sys.stdout.write(html)
 PYEOF
 }
 
-# Write a Python helper that removes whole elements from HTML read on stdin,
-# nesting-aware, so their links aren't crawled. Two selector kinds:
-#   - bare tag names (before "--"): e.g. header nav footer
-#   - class/id keywords (after "--"): remove any element whose class or id
-#     contains the keyword, e.g. footer navbar masthead -- catches non-semantic
-#     footers/navbars like <div class="site-footer"> or <div id="footer">.
+# Python helper: nesting-aware element removal by tag (before "--") and class/id keyword (after "--").
 write_stripper() {  # write_stripper <tags...> -- <class/id keywords...>
   cat > "$1" <<'PYEOF'
 import sys, re
@@ -634,11 +595,7 @@ sys.stdout.write(html)
 PYEOF
 }
 
-# Write a Python helper that extracts just the *content* of a page (reader mode)
-# and emits a clean, minimally-styled HTML document plus an image mapping (same
-# CRAWLIMG_<id> / mapping format as the image rewriter, so the download+slot
-# code is reused). Drops scripts/styles, header/nav/footer, sidebars, ads,
-# cookie/share widgets, and all site classes/ids.
+# Python helper (reader mode): extract content into a clean styled doc, drop chrome/ads (CRAWLIMG_ map).
 write_content_extractor() {  # write_content_extractor <path>
   cat > "$1" <<'PYEOF'
 import sys, re, os
@@ -650,9 +607,6 @@ except ImportError:
 clean_base   = sys.argv[1]
 mapping_path = sys.argv[2]
 with_images  = (len(sys.argv) > 3 and sys.argv[3] == '1')
-# "selected" means the input is already an explicitly-targeted region (--select),
-# so we must NOT strip header/nav/footer or chrome-by-keyword (the user chose it).
-selected     = (len(sys.argv) > 4 and sys.argv[4] == '1')
 
 html = sys.stdin.read()
 html = re.sub(r'(?is)<!--.*?-->', '', html)              # strip comments
@@ -727,21 +681,18 @@ if content is None:
 if content is None:
     content = re.sub(r'(?is)<head\b[^>]*>.*?</head>', '', html)
 
-# 2) Remove non-content elements (whole subtrees). Scripts/styles/forms are
-# always dropped; site chrome is dropped only when we're NOT inside an
-# explicitly-selected region.
+# 2) Remove non-content subtrees: scripts/styles/forms, then site chrome.
 for t in ('script', 'style', 'noscript', 'template', 'svg', 'iframe', 'object',
           'form', 'button', 'select', 'textarea', 'dialog'):
     content = drop_tag(content, t)
 
-if not selected:
-    for t in ('header', 'nav', 'footer', 'aside'):
-        content = drop_tag(content, t)
-    content = drop_by_keyword(content, [
-        'footer', 'navbar', 'masthead', 'sidebar', 'side-bar', 'site-header',
-        'cookie', 'consent', 'advert', 'promo', 'popup', 'modal', 'subscribe',
-        'newsletter', 'social', 'share', 'breadcrumb', 'pagination', 'related',
-        'skip-link'])
+for t in ('header', 'nav', 'footer', 'aside'):
+    content = drop_tag(content, t)
+content = drop_by_keyword(content, [
+    'footer', 'navbar', 'masthead', 'sidebar', 'side-bar', 'site-header',
+    'cookie', 'consent', 'advert', 'promo', 'popup', 'modal', 'subscribe',
+    'newsletter', 'social', 'share', 'breadcrumb', 'pagination', 'related',
+    'skip-link'])
 
 # 3) Images: slot ours via tokens, or drop entirely.
 imgmap, order, cnt = {}, [], [0]
@@ -825,10 +776,7 @@ sys.stdout.write(''.join(doc))
 PYEOF
 }
 
-# Write a Python helper that ISOLATES regions: given selectors (tagname, .class,
-# #id), it outputs only the matching elements' outer HTML (nesting-aware), so we
-# can scope crawling/extraction to e.g. a sidebar. Class/id match if the
-# selector value is a token or substring of the attribute (forgiving).
+# Python helper: isolate regions matching selectors (tag/.class/#id), output their outer HTML.
 write_selector() {  # write_selector <path>;  invoked as: select_region.py <selectors...>
   cat > "$1" <<'PYEOF'
 import sys, re
@@ -858,8 +806,7 @@ def matches(opentag, name, sel):
         v = attr_val(opentag, 'id')
         kw = sel[1:].lower()
         return v is not None and (v == kw or kw in v)
-    # Bare word: forgiving -- match the tag name, OR a class token/substring,
-    # OR the id. So `sidebar` matches <div class="col-lg-3 sidebar"> too.
+    # Bare word matches tag name, class token/substring, or id.
     kw = sel.lower()
     if name == kw:
         return True
@@ -905,32 +852,27 @@ PYEOF
 }
 
 # ------------------------------- crawl core ----------------------------------
-# Visited URLs are tracked in a plain array (bash 3.2 compatible).
-VISITED=""
+VISITED=""   # space-joined list of visited URLs (bash 3.2 compatible)
 seen() { case " $VISITED " in *" $1 "*) return 0 ;; *) return 1 ;; esac; }
 mark()  { VISITED="$VISITED $1"; }
 
-# Two parallel frontiers implement scraping priority: CONTENT links (page body)
-# are always drained before NAV links (inside <header>/<nav>). Each is a plain
-# indexed array used as a FIFO. (bash 3.2 friendly; no associative arrays.)
+# Priority frontiers (FIFO arrays): CONTENT drained before NAV (header/nav/footer).
 C_URL=(); C_DEPTH=(); N_URL=(); N_DEPTH=()
 
-# Is a URL already pending in either frontier?
-queued() { case " ${C_URL[*]} ${N_URL[*]} " in *" $1 "*) return 0 ;; *) return 1 ;; esac; }
+# Already pending in either frontier? (`:-` guards empty arrays on bash 3.2.)
+queued() { case " ${C_URL[*]:-} ${N_URL[*]:-} " in *" $1 "*) return 0 ;; *) return 1 ;; esac; }
 
-# Read raw hrefs on stdin, resolve/filter them, and enqueue new same-host pages.
-# <kind> is "content" or "nav"; nav links go to the low-priority frontier when
-# body-first ordering is on (otherwise everything is treated as content).
+# Resolve/filter hrefs on stdin and enqueue new same-host pages (nav -> low-priority frontier).
 enqueue_links() {  # enqueue_links <kind> <base_url> <depth>
   local kind="$1" base="$2" d="$3" raw abs lhost
   while IFS= read -r raw; do
     [ -z "$raw" ] && continue
     abs="$(resolve_url "$base" "$raw")"
     [ -z "$abs" ] && continue
+    abs="$(normalize_url "$abs")"                   # dedupe trivial variants
     lhost="$(url_host "$abs")"
     [ "$lhost" = "$host" ] || continue              # same host only
-    # Skip obvious non-page assets. Compare against the path only (ignore any
-    # ?query and #fragment) so e.g. "/app.css?id=abc" is still recognised.
+    # Skip non-page assets (match path only, so "/app.css?id=abc" is caught).
     local apath="${abs%%\?*}"; apath="${apath%%#*}"
     case "$apath" in
       *.css|*.js|*.mjs|*.cjs|*.map|*.json|*.xml|*.rss|*.txt|*.wasm|\
@@ -950,24 +892,24 @@ enqueue_links() {  # enqueue_links <kind> <base_url> <depth>
   done
 }
 
-# Build the chrome flag list. chrome-headless-shell is already headless; full
-# Chrome needs the --headless flag.
+# Chrome flags as an array (profile path may contain spaces); add --headless for full Chrome.
 build_flags() {
-  CHROME_FLAGS="--disable-gpu --no-sandbox --disable-dev-shm-usage \
---no-first-run --no-default-browser-check --hide-scrollbars \
---disable-extensions --user-data-dir=$PROFILE_DIR \
---allow-file-access-from-files \
---run-all-compositor-stages-before-draw"
+  CHROME_FLAGS=(
+    --disable-gpu --no-sandbox --disable-dev-shm-usage
+    --no-first-run --no-default-browser-check --hide-scrollbars
+    --disable-extensions "--user-data-dir=$PROFILE_DIR"
+    --allow-file-access-from-files
+    --run-all-compositor-stages-before-draw
+  )
   case "$CHROME" in
     *chrome-headless-shell*) : ;;
-    *) CHROME_FLAGS="--headless=new $CHROME_FLAGS" ;;
+    *) CHROME_FLAGS=(--headless=new "${CHROME_FLAGS[@]}") ;;
   esac
 }
 
 # Render a URL to PDF. Returns 0 on success.
 render_pdf() {  # render_pdf <url> <outfile>
-  # shellcheck disable=SC2086
-  "$CHROME" $CHROME_FLAGS \
+  "$CHROME" "${CHROME_FLAGS[@]}" \
     --no-pdf-header-footer \
     --print-to-pdf="$2" \
     --virtual-time-budget="$RENDER_BUDGET_MS" \
@@ -978,8 +920,7 @@ render_pdf() {  # render_pdf <url> <outfile>
 # Render a local HTML snapshot file to PDF. Returns 0 on success.
 render_local_pdf() {  # render_local_pdf <html_file> <outfile>
   local furl; furl="$(to_file_url "$1")"
-  # shellcheck disable=SC2086
-  "$CHROME" $CHROME_FLAGS \
+  "$CHROME" "${CHROME_FLAGS[@]}" \
     --no-pdf-header-footer \
     --print-to-pdf="$2" \
     --virtual-time-budget="$RENDER_BUDGET_MS" \
@@ -987,18 +928,9 @@ render_local_pdf() {  # render_local_pdf <html_file> <outfile>
   [ -s "$2" ]
 }
 
-# Build a PDF from a local snapshot whose images come from our own downloaded
-# copies, slotted back by id:
-#   1. generate the snapshot HTML + an image mapping (CRAWLIMG_<id> tokens)
-#   2. download every image by id into images/
-#   3. slot the local file:// path back in using the id (or fall back to the
-#      live URL if a download failed)
-#   4. print the snapshot to PDF
-# <mode> is "mirror" (faithful visual copy, keeps site CSS) or "content"
-# (reader mode: just the extracted content with our own minimal styling).
-# Returns 0 on success.
-build_pdf_snapshot() {  # build_pdf_snapshot <mode> <url> <dom_file> <pdf_out> [selected]
-  local mode="$1" url="$2" dom="$3" pdf="$4" selected="${5:-0}"
+# Build a PDF from a local snapshot: gen HTML+map, download images, slot by id (one sed pass), print.
+build_pdf_snapshot() {  # build_pdf_snapshot <mode> <url> <dom_file> <pdf_out>
+  local mode="$1" url="$2" dom="$3" pdf="$4"
   local pages_dir="$OUT_DIR/pages"
   mkdir -p "$pages_dir"
   local html="$pages_dir/$(printf '%04d' "$count")_$(slugify "$url").html"
@@ -1007,7 +939,7 @@ build_pdf_snapshot() {  # build_pdf_snapshot <mode> <url> <dom_file> <pdf_out> [
   local rc
   if [ "$mode" = "content" ]; then
     local wi=0; [ "$DOWNLOAD_IMAGES" = "yes" ] && wi=1
-    "$PYBIN" "$CONTENT_PY" "$url" "$mapping" "$wi" "$selected" < "$dom" > "$html" 2>/dev/null; rc=$?
+    "$PYBIN" "$CONTENT_PY" "$url" "$mapping" "$wi" < "$dom" > "$html" 2>/dev/null; rc=$?
   else
     "$PYBIN" "$REWRITER_PY" "$url" "$(auth_url "$url")" "$mapping" < "$dom" > "$html" 2>/dev/null; rc=$?
   fi
@@ -1017,7 +949,9 @@ build_pdf_snapshot() {  # build_pdf_snapshot <mode> <url> <dom_file> <pdf_out> [
     render_pdf "$url" "$pdf"; return
   fi
 
-  local id absurl ext rel abspath repl cu cp got=0 tab total n=0
+  # Download each image; collect token->path substitutions for one sed pass later.
+  local id absurl ext rel abspath repl esc cu cp got=0 tab total n=0
+  local sedscript; sedscript="$(mktemp 2>/dev/null || echo "$PROFILE_DIR/sed.$count")"
   tab="$(printf '\t')"
   total="$(wc -l < "$mapping" | tr -d ' ')"
   while IFS="$tab" read -r id absurl ext; do
@@ -1039,10 +973,19 @@ build_pdf_snapshot() {  # build_pdf_snapshot <mode> <url> <dom_file> <pdf_out> [
       rm -f "$abspath"
       repl="$(auth_url "$absurl")"   # let Chrome fetch it live as a fallback
     fi
-    slot_replace "CRAWLIMG_${id}" "$repl" "$html"
+    # Escape sed-special chars in the replacement; token id is numeric (safe).
+    esc="$(printf '%s' "$repl" | sed -e 's/[\\&|]/\\&/g')"
+    printf 's|CRAWLIMG_%s|%s|g\n' "$id" "$esc" >> "$sedscript"
   done < "$mapping"
   rm -f "$mapping"
   status_clear
+
+  # Single pass: slot every downloaded image's local path back into the HTML.
+  if [ -s "$sedscript" ]; then
+    local tmp; tmp="$(mktemp 2>/dev/null || echo "$html.tmp")"
+    sed -f "$sedscript" "$html" > "$tmp" && mv "$tmp" "$html"
+  fi
+  rm -f "$sedscript"
   [ "$total" -gt 0 ] && ok "  embedded $got/$total image(s) locally"
 
   run_spin "  rendering PDF" render_local_pdf "$html" "$pdf"
@@ -1050,39 +993,33 @@ build_pdf_snapshot() {  # build_pdf_snapshot <mode> <url> <dom_file> <pdf_out> [
 
 # Dump rendered DOM of a URL to stdout.
 dump_dom() {  # dump_dom <url>
-  # shellcheck disable=SC2086
-  "$CHROME" $CHROME_FLAGS \
+  "$CHROME" "${CHROME_FLAGS[@]}" \
     --dump-dom \
     --virtual-time-budget="$RENDER_BUDGET_MS" \
     "$(auth_url "$1")" 2>/dev/null
 }
 
-# Extract href values from <a> anchors only (one per line). Restricting to
-# anchors avoids picking up <link rel="stylesheet"/"icon"/...> and similar,
-# which are page assets, not pages to crawl.
+# Extract href values from <a> anchors only (skips <link>/<script> assets).
 extract_links() {  # extract_links <base_url> <dom_file>
   local dom="$2"
-  # Match the whole "<a ... href="value"" token, then pull just the final
-  # quoted value. Done in two greps so we never reference "href" in sed (keeps
-  # it case-insensitive and portable, and tolerates '=' inside query strings).
+  # Two greps so '=' inside query strings and case don't break extraction.
   grep -oiE '<a\b[^>]*href[[:space:]]*=[[:space:]]*"[^"]*"' "$dom" 2>/dev/null \
     | grep -oE '"[^"]*"$' | sed -E 's/^"//; s/"$//'
   grep -oiE "<a\b[^>]*href[[:space:]]*=[[:space:]]*'[^']*'" "$dom" 2>/dev/null \
     | grep -oE "'[^']*'\$" | sed -E "s/^'//; s/'\$//"
 }
 
-# Extract image URLs referenced by a page: <img src>, <img srcset>, <source
-# srcset>, and links/hrefs that point straight at an image file.
+# Extract image URLs from a page: <img src>/<img srcset> and image-file hrefs.
 extract_images() {  # extract_images <dom_file>
   local dom="$1"
-  # src="..." and src='...'
-  grep -oiE 'src[[:space:]]*=[[:space:]]*"[^"]*"' "$dom" 2>/dev/null \
-    | sed -E 's/^[^"]*"//; s/"$//'
-  grep -oiE "src[[:space:]]*=[[:space:]]*'[^']*'" "$dom" 2>/dev/null \
-    | sed -E "s/^[^']*'//; s/'\$//"
-  # srcset="url1 1x, url2 2x" -> emit each url
-  grep -oiE 'srcset[[:space:]]*=[[:space:]]*"[^"]*"' "$dom" 2>/dev/null \
-    | sed -E 's/^[^"]*"//; s/"$//' \
+  # <img ... src="..."> only (anchored so <script>/<iframe> srcs aren't grabbed).
+  grep -oiE '<img\b[^>]*src[[:space:]]*=[[:space:]]*"[^"]*"' "$dom" 2>/dev/null \
+    | grep -oE '"[^"]*"$' | sed -E 's/^"//; s/"$//'
+  grep -oiE "<img\b[^>]*src[[:space:]]*=[[:space:]]*'[^']*'" "$dom" 2>/dev/null \
+    | grep -oE "'[^']*'\$" | sed -E "s/^'//; s/'\$//"
+  # <img ... srcset="url1 1x, url2 2x"> -> emit each url
+  grep -oiE '<img\b[^>]*srcset[[:space:]]*=[[:space:]]*"[^"]*"' "$dom" 2>/dev/null \
+    | grep -oE '"[^"]*"$' | sed -E 's/^"//; s/"$//' \
     | tr ',' '\n' | sed -E 's/^[[:space:]]+//; s/[[:space:]].*$//'
   # hrefs that point at an image file
   grep -oiE 'href[[:space:]]*=[[:space:]]*"[^"]*"' "$dom" 2>/dev/null \
@@ -1148,13 +1085,11 @@ main() {
   log "Max pages : $MAX_PAGES   Max depth: $MAX_DEPTH   Delay: ${DELAY}s"
 
   # ----- preflight: hard requirements (clean message + exit if unmet) -----
-  # A downloader is needed to fetch the browser and/or page images.
   if [ "$USE_SYSTEM_CHROME" != "yes" ] || [ "$DOWNLOAD_IMAGES" = "yes" ]; then
     if ! command -v curl >/dev/null 2>&1 && ! command -v wget >/dev/null 2>&1; then
       missing_required curl "A downloader (curl or wget) is required to fetch the browser and/or images."
     fi
   fi
-  # An unzip method is needed to unpack the downloaded browser.
   if [ "$USE_SYSTEM_CHROME" != "yes" ]; then
     if ! command -v unzip >/dev/null 2>&1 && [ -z "$PYBIN" ] && ! command -v tar >/dev/null 2>&1; then
       missing_required unzip "Unpacking the downloaded browser needs one of: unzip, python, or tar."
@@ -1171,24 +1106,21 @@ main() {
 
   # ----- output dir & temp profile -----
   local host ts
+  START_URL="$(normalize_url "$START_URL")"   # so the seed matches discovered links
   host="$(url_host "$START_URL")"
   ts="$(date +%Y%m%d-%H%M%S)"
   [ -z "$OUT_DIR" ] && OUT_DIR="$SCRIPT_DIR/output/${host}-${ts}"
   mkdir -p "$OUT_DIR"
   PROFILE_DIR="$(mktemp -d 2>/dev/null || echo "$CACHE_DIR/profile-$$")"
   mkdir -p "$PROFILE_DIR"
-  # Clean up the temp profile only when the whole script exits.
-  trap 'rm -rf "$PROFILE_DIR"' EXIT
-  # Ctrl-C skips the current page; a quick double Ctrl-C stops the crawl.
+  trap 'rm -rf "$PROFILE_DIR"' EXIT          # clean temp profile on exit
   SKIP_CURRENT=0; ABORT=0; LAST_INT=-100
   trap on_interrupt INT
 
   build_flags
 
-  # Smoke-test the downloaded browser; fall back to a system one if it can't run
-  # (common on minimal Linux that lacks Chrome's shared libraries).
-  if ! echo "<html><body>ok</body></html>" >/dev/null 2>&1; then :; fi
-  if ! "$CHROME" $CHROME_FLAGS --dump-dom "data:text/html,<title>t</title>" >/dev/null 2>&1; then
+  # Smoke-test the browser; fall back to a system one if it can't launch.
+  if ! "$CHROME" "${CHROME_FLAGS[@]}" --dump-dom "data:text/html,<title>t</title>" >/dev/null 2>&1; then
     warn "Downloaded browser failed to launch (often missing system libraries on Linux)."
     if sysc="$(find_system_chrome)"; then
       warn "Falling back to system browser: $sysc"
@@ -1206,10 +1138,7 @@ main() {
     mkdir -p "$IMAGES_DIR"; : > "$IMG_MANIFEST"
   fi
 
-  # Two optional features need Python: (1) image slot-back (embedding our
-  # downloaded images into the PDF) and (2) body-first crawl ordering. Python
-  # can't be auto-installed (unlike the browser), so if it's missing we print a
-  # single clean notice with install instructions and fall back gracefully.
+  # Python-dependent features: if Python is missing, warn once and degrade.
   SLOT_IMAGES="no"
   if [ -z "$PYBIN" ] && { [ "$DOWNLOAD_IMAGES" = "yes" ] || [ "$BODY_FIRST" = "yes" ] || [ "$CONTENT_ONLY" = "yes" ] || [ -n "$SELECT" ]; }; then
     warn "Python 3 was not found on PATH (and can't be installed automatically)."
@@ -1225,10 +1154,14 @@ main() {
       printf '    %s\n' "- body-first crawl order -> falling back to a plain breadth-first crawl" >&2
   fi
 
-  # Section targeting: scope crawling (and content extraction) to a region.
+  # Section targeting: scope crawling to a region.
+  SELECT_ARGS=()
   if [ -n "$SELECT" ]; then
     if [ -n "$PYBIN" ]; then
       write_selector "$SELECT_PY"
+      set -f   # split selectors with globbing off (so '*foo*' isn't expanded)
+      SELECT_ARGS=( $(printf '%s' "$SELECT" | tr ',' ' ') )
+      set +f
       log "Targeting section(s): $SELECT (following only links found inside it)"
     else
       SELECT=""   # already explained above; crawl whole page
@@ -1245,19 +1178,14 @@ main() {
     fi
   fi
 
-  # Image slot-back: embed downloaded images into the PDF (needs Python). In
-  # content-only mode the extractor handles image tokens itself, so we only need
-  # the standalone rewriter for the mirror path.
+  # Image slot-back (mirror path only; content mode handles tokens itself).
   if [ "$DOWNLOAD_IMAGES" = "yes" ] && [ -n "$PYBIN" ]; then
     SLOT_IMAGES="yes"
     [ "$CONTENT_ONLY" = "yes" ] || write_rewriter "$REWRITER_PY"
     [ "$CONTENT_ONLY" = "yes" ] || log "Image mode: slot downloaded images back into PDFs by id (Python: $PYBIN)"
   fi
 
-  # Body-first crawl ordering: drain content links before the site "chrome"
-  # (header/nav/footer). STRIP_SPEC is passed unquoted on purpose so it splits
-  # into args: semantic tags, then "--", then class/id keywords for
-  # non-semantic regions (e.g. <div class="site-footer">).
+  # Body-first ordering. STRIP_SPEC (unquoted -> args): tags, "--", class/id keywords.
   STRIP_SPEC="header nav footer -- footer navbar masthead"
   if [ "$BODY_FIRST" = "yes" ]; then
     if [ -n "$PYBIN" ]; then
@@ -1276,15 +1204,14 @@ main() {
   local cHead=0 nHead=0 count=0 manifest="$OUT_DIR/manifest.txt"
   local crawl_start="$SECONDS"
   : > "$manifest"
-  PDF_LIST=""
+  PDF_LIST=()   # array so paths with spaces survive the merge step
   log "Crawling... (Ctrl-C skips the current page; double-tap Ctrl-C to stop)"
 
   while [ "$cHead" -lt "${#C_URL[@]}" ] || [ "$nHead" -lt "${#N_URL[@]}" ]; do
     [ "$ABORT" = 1 ] && { warn "Crawl stopped early by user."; break; }
     [ "$count" -ge "$MAX_PAGES" ] && { warn "Reached max-pages limit ($MAX_PAGES)."; break; }
 
-    # Always take from the content frontier first; only fall back to the
-    # header/nav frontier once all content is exhausted.
+    # Content frontier first; fall back to header/nav only when content is empty.
     local url depth kind
     if [ "$cHead" -lt "${#C_URL[@]}" ]; then
       url="${C_URL[$cHead]}"; depth="${C_DEPTH[$cHead]}"; cHead=$((cHead + 1)); kind="content"
@@ -1300,9 +1227,7 @@ main() {
     idx="$(printf '%04d' "$count")"
     pdf="$OUT_DIR/${idx}_$(slugify "$url").pdf"
 
-    # Per-page header: progress, depth, which frontier, pending content/nav
-    # counts, images so far, and elapsed time -- so it's always clear what's
-    # happening.
+    # Per-page status: progress, depth, frontier, pending counts, images, elapsed.
     local q_content q_nav elapsed origin=""
     q_content=$(( ${#C_URL[@]} - cHead ))
     q_nav=$(( ${#N_URL[@]} - nHead ))
@@ -1311,9 +1236,7 @@ main() {
     log "[$count/$MAX_PAGES] depth $depth$origin | queue ${q_content}c/${q_nav}n | imgs $IMG_COUNT | $elapsed elapsed"
     printf '    \033[2m%s\033[0m\n' "$url" >&2
 
-    # Grab the rendered DOM once if we need it for slotting images and/or for
-    # discovering links. (Live rendering hits the network directly and needs no
-    # DOM, so we can skip the dump on plain leaf pages.)
+    # Grab the rendered DOM once if needed (images, content, select, or links).
     local dom="" need_dom="no"
     [ "$CONTENT_ONLY" = "yes" ] && need_dom="yes"
     [ -n "$SELECT" ] && need_dom="yes"
@@ -1325,21 +1248,19 @@ main() {
       run_spin "  loading page" dump_dom "$url" > "$dom"
     fi
 
-    # Skip the rest of this page's work if Ctrl-C asked us to (or we're aborting).
+    # Skip this page's work if Ctrl-C asked to (interrupt guard).
     local region_dom=""
     if [ "$SKIP_CURRENT" != 1 ] && [ "$ABORT" != 1 ]; then
 
-    # When a section is targeted, isolate it once -- the region scopes which
-    # links we follow; it does NOT change what each PDF contains.
+    # Isolate the targeted section (scopes link discovery, not extraction).
     if [ -n "$SELECT" ] && [ -n "$dom" ]; then
       region_dom="$(mktemp 2>/dev/null || echo "$PROFILE_DIR/region.$count")"
-      if ! "$PYBIN" "$SELECT_PY" $SELECT < "$dom" > "$region_dom" 2>/dev/null; then
+      if ! "$PYBIN" "$SELECT_PY" "${SELECT_ARGS[@]}" < "$dom" > "$region_dom" 2>/dev/null; then
         rm -f "$region_dom"; region_dom=""
       fi
     fi
 
-    # Produce the PDF. Content-only always extracts the page's MAIN content;
-    # --select only affects which links we crawl, not extraction.
+    # Produce the PDF (content-only extracts main content regardless of --select).
     local pdf_ok="no"
     if [ "$CONTENT_ONLY" = "yes" ] && [ -n "$dom" ]; then
       build_pdf_snapshot content "$url" "$dom" "$pdf" && pdf_ok="yes"
@@ -1354,7 +1275,7 @@ main() {
     if [ "$pdf_ok" = "yes" ]; then
       ok "  -> $(basename "$pdf")"
       printf '%s\t%s\n' "$(basename "$pdf")" "$url" >> "$manifest"
-      PDF_LIST="$PDF_LIST $pdf"
+      PDF_LIST+=("$pdf")
     else
       warn "  render failed, skipping"
       rm -f "$pdf"
@@ -1371,9 +1292,7 @@ $(extract_links "$url" "$region_dom")
 EOF
         fi
       elif [ "$BODY_FIRST" = "yes" ]; then
-        # Content frontier: links from the body with header/nav/footer regions
-        # removed -- both semantic tags and non-semantic ones detected by
-        # class/id keyword (e.g. <div class="site-footer">).
+        # Content frontier = links from the body (header/nav/footer stripped).
         local content_dom
         content_dom="$(mktemp 2>/dev/null || echo "$PROFILE_DIR/links.$count")"
         if "$PYBIN" "$STRIPPER_PY" $STRIP_SPEC < "$dom" > "$content_dom" 2>/dev/null; then
@@ -1382,9 +1301,7 @@ $(extract_links "$url" "$content_dom")
 EOF
         fi
         rm -f "$content_dom"
-        # Nav frontier: every remaining link (header/nav/footer ones). URLs
-        # already queued as content are skipped by enqueue_links' dedup, so only
-        # the chrome (header/nav/footer) links land here.
+        # Nav frontier = remaining links (content ones already queued are deduped).
         enqueue_links nav "$url" "$nd" <<EOF
 $(extract_links "$url" "$dom")
 EOF
@@ -1400,17 +1317,14 @@ EOF
     [ -n "$region_dom" ] && rm -f "$region_dom"
     [ -n "$dom" ] && rm -f "$dom"
 
-    # If a single Ctrl-C asked to skip this page, note it and reset for the next.
     if [ "$SKIP_CURRENT" = 1 ]; then warn "  page skipped"; SKIP_CURRENT=0; fi
-    # A double Ctrl-C aborts the whole crawl (partial results are kept).
     [ "$ABORT" = 1 ] && { warn "Crawl stopped early by user."; break; }
 
-    # be polite
-    sleep "$DELAY" 2>/dev/null || true
+    sleep "$DELAY" 2>/dev/null || true   # be polite
   done
 
   local n_pdf total_time
-  n_pdf="$(printf '%s' "$PDF_LIST" | wc -w | tr -d ' ')"
+  n_pdf=${#PDF_LIST[@]}
   total_time="$(fmt_time $(( SECONDS - crawl_start )))"
   printf '\033[36m%s\033[0m\n' "----------------------------------------------------------" >&2
   ok "Crawled $count page(s) in $total_time -> $n_pdf PDF(s)"
@@ -1422,13 +1336,11 @@ EOF
   if [ "$DO_MERGE" != "no" ]; then
     local merged="$OUT_DIR/_ALL_${host}.pdf"
     if command -v pdfunite >/dev/null 2>&1; then
-      # shellcheck disable=SC2086
-      run_spin "Merging $n_pdf PDF(s)" pdfunite $PDF_LIST "$merged" \
+      run_spin "Merging $n_pdf PDF(s)" pdfunite "${PDF_LIST[@]}" "$merged" \
         && ok "Merged PDF: $merged" \
         || warn "pdfunite merge failed; per-page PDFs are still available."
     elif command -v gs >/dev/null 2>&1; then
-      # shellcheck disable=SC2086
-      run_spin "Merging $n_pdf PDF(s)" gs -dBATCH -dNOPAUSE -q -sDEVICE=pdfwrite -sOutputFile="$merged" $PDF_LIST \
+      run_spin "Merging $n_pdf PDF(s)" gs -dBATCH -dNOPAUSE -q -sDEVICE=pdfwrite -sOutputFile="$merged" "${PDF_LIST[@]}" \
         && ok "Merged PDF: $merged" \
         || warn "ghostscript merge failed; per-page PDFs are still available."
     else
