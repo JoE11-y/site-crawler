@@ -1026,8 +1026,16 @@ build_pdf_snapshot() {  # build_pdf_snapshot <mode> <url> <dom_file> <pdf_out>
   run_spin "  rendering PDF" render_local_pdf "$html" "$pdf"
 }
 
-# Dump rendered DOM of a URL to stdout.
+# Dump a page's HTML to stdout. For the Basic-Auth host we use curl (Chrome
+# can't send Basic-Auth from the CLI); otherwise Chrome --dump-dom (JS-rendered).
 dump_dom() {  # dump_dom <url>
+  if [ -n "$AUTH_USER" ] && [ "$(url_host "$1")" = "$host" ]; then
+    if command -v curl >/dev/null 2>&1; then
+      curl -fsSL --retry 2 ${CURL_EXTRA[@]+"${CURL_EXTRA[@]}"} -u "$AUTH_USER:$AUTH_PASS" "$1" 2>"$ERR_SINK"; return
+    elif command -v wget >/dev/null 2>&1; then
+      wget -q ${WGET_EXTRA[@]+"${WGET_EXTRA[@]}"} --user="$AUTH_USER" --password="$AUTH_PASS" -O - "$1" 2>"$ERR_SINK"; return
+    fi
+  fi
   "$CHROME" "${CHROME_FLAGS[@]}" \
     --dump-dom \
     --virtual-time-budget="$RENDER_BUDGET_MS" \
