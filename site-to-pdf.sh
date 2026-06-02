@@ -916,11 +916,6 @@ build_flags() {
     --disable-extensions "--user-data-dir=$PROFILE_DIR"
     --allow-file-access-from-files
     --run-all-compositor-stages-before-draw
-    # Kill startup background traffic that stalls cold launches (esp. Windows).
-    --disable-background-networking --disable-component-update
-    --disable-client-side-phishing-detection --disable-default-apps --disable-sync
-    --disable-domain-reliability --metrics-recording-only --mute-audio
-    --disable-features=Translate,MediaRouter,OptimizationHints,BackForwardCache
   )
   case "$CHROME" in
     *chrome-headless-shell*) : ;;
