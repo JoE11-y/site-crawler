@@ -280,7 +280,7 @@ extract_zip() {  # extract_zip <zipfile> <destdir>
   if command -v unzip >/dev/null 2>&1; then
     unzip -q -o "$zip" -d "$dest"
   elif [ -n "$PYBIN" ]; then
-    "$PYBIN" -c 'import sys,zipfile; zipfile.ZipFile(sys.argv[1]).extractall(sys.argv[2])' "$zip" "$dest"
+    "$PYBIN" -c 'import sys,zipfile; zipfile.ZipFile(sys.argv[1]).extractall(sys.argv[2])' "$(pypath "$zip")" "$(pypath "$dest")"
   elif command -v tar >/dev/null 2>&1; then
     # Windows' built-in tar (bsdtar) and macOS tar can extract .zip archives.
     tar -xf "$zip" -C "$dest"
@@ -436,6 +436,10 @@ to_file_url() {  # to_file_url <abs_path>
     printf 'file://%s' "$p"                     # /home/x -> file:///home/x
   fi
 }
+
+# Native path for paths handed to Python (native Windows python can't open MSYS
+# /c/... paths). No-op off Windows. Bash redirections (< >) don't need this.
+pypath() { if command -v cygpath >/dev/null 2>&1; then cygpath -m "$1"; else printf '%s' "$1"; fi; }
 
 # Python helper (mirror mode): tokenise <img> src to CRAWLIMG_ ids; absolutise other resource URLs.
 write_rewriter() {  # write_rewriter <path>
@@ -939,9 +943,9 @@ build_pdf_snapshot() {  # build_pdf_snapshot <mode> <url> <dom_file> <pdf_out>
   local rc
   if [ "$mode" = "content" ]; then
     local wi=0; [ "$DOWNLOAD_IMAGES" = "yes" ] && wi=1
-    "$PYBIN" "$CONTENT_PY" "$url" "$mapping" "$wi" < "$dom" > "$html" 2>/dev/null; rc=$?
+    "$PYBIN" "$(pypath "$CONTENT_PY")" "$url" "$(pypath "$mapping")" "$wi" < "$dom" > "$html" 2>/dev/null; rc=$?
   else
-    "$PYBIN" "$REWRITER_PY" "$url" "$(auth_url "$url")" "$mapping" < "$dom" > "$html" 2>/dev/null; rc=$?
+    "$PYBIN" "$(pypath "$REWRITER_PY")" "$url" "$(auth_url "$url")" "$(pypath "$mapping")" < "$dom" > "$html" 2>/dev/null; rc=$?
   fi
   if [ "$rc" -ne 0 ]; then
     warn "  snapshot generation failed; rendering live instead"
@@ -1255,7 +1259,7 @@ main() {
     # Isolate the targeted section (scopes link discovery, not extraction).
     if [ -n "$SELECT" ] && [ -n "$dom" ]; then
       region_dom="$(mktemp 2>/dev/null || echo "$PROFILE_DIR/region.$count")"
-      if ! "$PYBIN" "$SELECT_PY" "${SELECT_ARGS[@]}" < "$dom" > "$region_dom" 2>/dev/null; then
+      if ! "$PYBIN" "$(pypath "$SELECT_PY")" "${SELECT_ARGS[@]}" < "$dom" > "$region_dom" 2>/dev/null; then
         rm -f "$region_dom"; region_dom=""
       fi
     fi
@@ -1295,7 +1299,7 @@ EOF
         # Content frontier = links from the body (header/nav/footer stripped).
         local content_dom
         content_dom="$(mktemp 2>/dev/null || echo "$PROFILE_DIR/links.$count")"
-        if "$PYBIN" "$STRIPPER_PY" $STRIP_SPEC < "$dom" > "$content_dom" 2>/dev/null; then
+        if "$PYBIN" "$(pypath "$STRIPPER_PY")" $STRIP_SPEC < "$dom" > "$content_dom" 2>/dev/null; then
           enqueue_links content "$url" "$nd" <<EOF
 $(extract_links "$url" "$content_dom")
 EOF
