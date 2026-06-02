@@ -59,9 +59,15 @@ CACHE_DIR="$SCRIPT_DIR/.cache"
 CFT_JSON_URL="https://googlechromelabs.github.io/chrome-for-testing/last-known-good-versions-with-downloads.json"
 
 # Python powers image slot-back, content/reader mode and section select; optional.
+# Pick one that actually RUNS -- the Windows Store alias stub is on PATH but only
+# prints "Python was not found..." and errors, so existence alone isn't enough.
 PYBIN=""
-command -v python3 >/dev/null 2>&1 && PYBIN="python3"
-[ -z "$PYBIN" ] && command -v python >/dev/null 2>&1 && PYBIN="python"
+for _py in python3 python py; do
+  if command -v "$_py" >/dev/null 2>&1 && "$_py" -c '' >/dev/null 2>&1; then
+    PYBIN="$_py"; break
+  fi
+done
+unset _py
 REWRITER_PY="$CACHE_DIR/rewrite_images.py"
 STRIPPER_PY="$CACHE_DIR/strip_tags.py"
 CONTENT_PY="$CACHE_DIR/extract_content.py"
