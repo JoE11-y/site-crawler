@@ -916,6 +916,11 @@ build_flags() {
     --disable-extensions "--user-data-dir=$PROFILE_DIR"
     --allow-file-access-from-files
     --run-all-compositor-stages-before-draw
+    # Kill startup background traffic that stalls cold launches (esp. Windows).
+    --disable-background-networking --disable-component-update
+    --disable-client-side-phishing-detection --disable-default-apps --disable-sync
+    --disable-domain-reliability --metrics-recording-only --mute-audio
+    --disable-features=Translate,MediaRouter,OptimizationHints,BackForwardCache
   )
   case "$CHROME" in
     *chrome-headless-shell*) : ;;
@@ -974,6 +979,7 @@ build_pdf_snapshot() {  # build_pdf_snapshot <mode> <url> <dom_file> <pdf_out>
   total="$(wc -l < "$mapping" | tr -d ' ')"
   while IFS="$tab" read -r id absurl ext; do
     [ -z "$id" ] && continue
+    id="${id%$'\r'}"; absurl="${absurl%$'\r'}"; ext="${ext%$'\r'}"   # strip CR (Windows CRLF mapping)
     { [ "$SKIP_CURRENT" = 1 ] || [ "$ABORT" = 1 ]; } && break   # Ctrl-C: stop fetching
     n=$(( n + 1 ))
     status "  downloading image $n/$total ..."
