@@ -1281,6 +1281,11 @@ main() {
   fi
 
   [ -n "$AUTH_USER" ] && log "Basic-Auth enabled for host '$host' (user: $AUTH_USER)"
+  # Catch the common "set them on separate lines" mistake.
+  if [ -z "$AUTH_USER" ] && [ -n "$AUTH_PASS" ]; then
+    warn "CRAWL_PASS is set but CRAWL_USER is empty -> Basic-Auth will NOT be sent (page will 401 / show blank)."
+    warn "Pass both on the SAME command line, or 'export' both:  CRAWL_USER=... CRAWL_PASS=... ./site-to-pdf.sh ..."
+  fi
   [ -n "$PROXY" ] && log "Proxy: ${PROXY_NOCREDS:-$PROXY}${PROXY_USER:+ (authenticated)}"
   [ "$INSECURE" = "yes" ] && log "TLS certificate verification disabled (--insecure)"
 
