@@ -432,7 +432,9 @@ resolve_url() {
   esac
 }
 
-# Canonicalise a URL so variants dedupe (drop fragment, lowercase host, strip default port/trailing slash).
+# Canonicalise a URL so variants dedupe: drop fragment, lowercase host, strip
+# default port. The path (incl. any trailing slash) is kept AS-IS, because some
+# servers treat "/docs" and "/docs/" differently (e.g. only "/docs/" returns 200).
 normalize_url() {  # normalize_url <abs_url>
   local u="$1" base query scheme rest host path
   u="${u%%#*}"
@@ -451,7 +453,6 @@ normalize_url() {  # normalize_url <abs_url>
     http://*:80)   host="${host%:80}" ;;
     https://*:443) host="${host%:443}" ;;
   esac
-  [ "$path" != "/" ] && path="${path%/}"
   printf '%s%s%s%s' "$scheme" "$host" "$path" "$query"
 }
 
