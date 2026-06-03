@@ -93,6 +93,9 @@ ok()   { printf '\033[32m[+]\033[0m %s\n' "$*" >&2; }
 warn() { printf '\033[33m[!]\033[0m %s\n' "$*" >&2; }
 err()  { printf '\033[31m[x]\033[0m %s\n' "$*" >&2; }
 die()  { err "$@"; exit 1; }
+dbg()  { [ "${DEBUG:-no}" = "yes" ] && printf '\033[35m[debug]\033[0m %s\n' "$*" >&2; return 0; }
+# Mask credentials in a URL for safe logging (user:pass@ -> ***@).
+mask_url() { printf '%s' "$1" | sed -E 's#(//)[^@/]*@#\1***@#'; }
 
 # Best install command for a dependency, per detected package manager.
 install_hint() {  # install_hint <dep: python|curl|wget|unzip|poppler>
@@ -1012,6 +1015,7 @@ build_pdf_snapshot() {  # build_pdf_snapshot <mode> <url> <dom_file> <pdf_out>
     render_pdf "$url" "$pdf"; return
   fi
   rm -f "$errlog"
+  dbg "snapshot[$mode]: $(wc -c < "$html" 2>/dev/null | tr -d ' ') bytes html, $(wc -l < "$mapping" 2>/dev/null | tr -d ' ') image(s) mapped -> $html"
 
   # Download each image; collect token->path substitutions for one sed pass later.
   local id absurl ext rel abspath repl esc cu cp got=0 tab total n=0
@@ -1030,13 +1034,15 @@ build_pdf_snapshot() {  # build_pdf_snapshot <mode> <url> <dom_file> <pdf_out>
     if [ -n "$AUTH_USER" ] && [ "$(url_host "$absurl")" = "$host" ]; then
       cu="$AUTH_USER"; cp="$AUTH_PASS"
     fi
-    if fetch_auth "$absurl" "$abspath" "$cu" "$cp" 2>/dev/null && [ -s "$abspath" ]; then
+    if fetch_auth "$absurl" "$abspath" "$cu" "$cp" 2>"$ERR_SINK" && [ -s "$abspath" ]; then
       repl="$(to_file_url "$abspath")"
       got=$((got + 1)); IMG_COUNT=$((IMG_COUNT + 1))
       printf '%s\t%s\n' "$rel" "$absurl" >> "$IMG_MANIFEST"
+      dbg "  image OK ($(wc -c < "$abspath" 2>/dev/null | tr -d ' ')b): $absurl"
     else
       rm -f "$abspath"
       repl="$(auth_url "$absurl")"   # let Chrome fetch it live as a fallback
+      dbg "  image FAILED (using live URL): $absurl"
     fi
     # Escape sed-special chars in the replacement; token id is numeric (safe).
     esc="$(printf '%s' "$repl" | sed -e 's/[\\&|]/\\&/g')"
@@ -1060,12 +1066,15 @@ build_pdf_snapshot() {  # build_pdf_snapshot <mode> <url> <dom_file> <pdf_out>
 # can't send Basic-Auth from the CLI); otherwise Chrome --dump-dom (JS-rendered).
 dump_dom() {  # dump_dom <url>
   if [ -n "$AUTH_USER" ] && [ "$(url_host "$1")" = "$host" ]; then
+    local v=""; [ "$DEBUG" = "yes" ] && v="-v"   # -v traces proxy CONNECT, TLS, auth headers, status
+    dbg "fetch via curl (Basic-Auth host, user=$AUTH_USER, proxy=${PROXY_NOCREDS:-none}): $1"
     if command -v curl >/dev/null 2>&1; then
-      curl -fsSL --retry 2 ${CURL_EXTRA[@]+"${CURL_EXTRA[@]}"} -u "$AUTH_USER:$AUTH_PASS" "$1" 2>"$ERR_SINK"; return
+      curl -fsSL --retry 2 $v ${CURL_EXTRA[@]+"${CURL_EXTRA[@]}"} -u "$AUTH_USER:$AUTH_PASS" "$1" 2>"$ERR_SINK"; return
     elif command -v wget >/dev/null 2>&1; then
-      wget -q ${WGET_EXTRA[@]+"${WGET_EXTRA[@]}"} --user="$AUTH_USER" --password="$AUTH_PASS" -O - "$1" 2>"$ERR_SINK"; return
+      wget ${v:+-d} ${WGET_EXTRA[@]+"${WGET_EXTRA[@]}"} --user="$AUTH_USER" --password="$AUTH_PASS" -O - "$1" 2>"$ERR_SINK"; return
     fi
   fi
+  dbg "fetch via Chrome --dump-dom: $(mask_url "$(auth_url "$1")")"
   "$CHROME" "${CHROME_FLAGS[@]}" \
     --dump-dom \
     --virtual-time-budget="$RENDER_BUDGET_MS" \
@@ -1275,6 +1284,13 @@ main() {
   [ -n "$PROXY" ] && log "Proxy: ${PROXY_NOCREDS:-$PROXY}${PROXY_USER:+ (authenticated)}"
   [ "$INSECURE" = "yes" ] && log "TLS certificate verification disabled (--insecure)"
 
+  # Verbose config dump for troubleshooting.
+  dbg "config: browser=$CHROME"
+  dbg "config: python=${PYBIN:-none}  content_only=$CONTENT_ONLY  slot_images=$SLOT_IMAGES  body_first=$BODY_FIRST  select='${SELECT}'"
+  dbg "config: auth_user=$([ -n "$AUTH_USER" ] && echo set || echo none)  auth_pass=$([ -n "$AUTH_PASS" ] && echo set || echo empty)  proxy=${PROXY_NOCREDS:-none}  proxy_user=$([ -n "$PROXY_USER" ] && echo "$PROXY_USER" || echo none)  insecure=$INSECURE"
+  dbg "config: render_budget=${RENDER_BUDGET_MS}ms  delay=${DELAY}s  max_pages=$MAX_PAGES  depth=$MAX_DEPTH"
+  dbg "config: chrome flags = ${CHROME_FLAGS[*]}"
+
   # ----- crawl -----
   # Seed the high-priority (content) frontier with the start URL.
   C_URL=("$START_URL"); C_DEPTH=(0); N_URL=(); N_DEPTH=()
@@ -1322,7 +1338,15 @@ main() {
     [ "$depth" -lt "$MAX_DEPTH" ] && need_dom="yes"
     if [ "$need_dom" = "yes" ]; then
       dom="$(mktemp 2>/dev/null || echo "$PROFILE_DIR/dom.$count")"
-      run_spin "  loading page" dump_dom "$url" > "$dom"
+      local domrc=0 domsz=0
+      run_spin "  loading page" dump_dom "$url" > "$dom"; domrc=$?
+      domsz="$(wc -c < "$dom" 2>/dev/null | tr -d ' ')"; domsz="${domsz:-0}"
+      dbg "page fetched: exit=$domrc, ${domsz} bytes -> $dom"
+      if [ "$domrc" -ne 0 ]; then
+        warn "  page fetch failed (exit $domrc) -- proxy/TLS/auth? re-run with --debug to see the curl/Chrome trace"
+      elif [ "$domsz" -lt 200 ]; then
+        warn "  page is nearly empty (${domsz} bytes) -- likely auth rejected (white page) or JS-only content; --debug shows the HTTP status"
+      fi
     fi
 
     # Skip this page's work if Ctrl-C asked to (interrupt guard).
