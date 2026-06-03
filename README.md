@@ -232,6 +232,7 @@ Usage: ./site-to-pdf.sh [URL] [options]
 | `--no-images`           | off (images on)                      | Do not download images; leave them as live URLs in the PDF.        |
 | `--content-only`, `--reader` | off                             | Reader mode: extract just the content into a clean PDF, dropping chrome & site styling. |
 | `--select`, `--section`, `--target` `SEL` | off                | Follow only links inside section(s) matching `SEL` (tag, `.class`, `#id`, or bare word; comma-separated). Scopes crawling, not extraction. |
+| `--ignore`, `--exclude` `SEL` | off                            | Remove elements matching `SEL` (same selector syntax) from the page before rendering — so they appear in neither the PDF nor link discovery. |
 | `--proxy URL`           | off                                  | Route Chrome + curl/wget through a proxy (e.g. corporate).         |
 | `--proxy-host H`        | —                                    | Proxy host (alternative to `--proxy`; env `PROXY_HOST`).           |
 | `--proxy-port P`        | —                                    | Proxy port (env `PROXY_PORT`).                                     |
@@ -355,4 +356,7 @@ PROXY_HOST=proxy.corp PROXY_PORT=8080 PROXY_USER=alice PROXY_PASS=pw \
 
 # Follow only a side nav's links; each PDF holds that page's main content
 ./site-to-pdf.sh https://example.com --select sidebar --content-only
+
+# Strip cookie banners / ads / a footer from every page before rendering
+./site-to-pdf.sh https://example.com --ignore '.cookie-banner, #ads, footer'
 ```

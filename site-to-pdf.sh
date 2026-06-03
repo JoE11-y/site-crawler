@@ -22,6 +22,8 @@
 #       --no-images        Do not download images (left as live URLs in the PDF)
 #       --content-only     Reader mode: extract main content, drop chrome/styling
 #       --select SEL       Follow only links inside section(s) SEL: tag/.class/#id/bare word
+#       --ignore SEL       Remove elements matching SEL from the page before rendering
+#                          (same selector syntax; comma-separated; alias --exclude)
 #       --proxy URL        Route Chrome + curl/wget through a proxy (e.g. corporate)
 #       --proxy-host H     Proxy host (alt. to --proxy; env PROXY_HOST)
 #       --proxy-port P     Proxy port (env PROXY_PORT)
@@ -46,6 +48,7 @@ RENDER_BUDGET_MS=12000
 DOWNLOAD_IMAGES="yes"
 CONTENT_ONLY="no"
 SELECT=""
+IGNORE=""
 DEBUG="no"
 ERR_SINK="/dev/null"      # where child stderr goes; /dev/stderr under --debug
 PROXY=""                  # full proxy URL (--proxy); else assembled from the parts below
@@ -205,6 +208,7 @@ while [ $# -gt 0 ]; do
     --no-images)           DOWNLOAD_IMAGES="no"; shift ;;
     --content-only|--reader) CONTENT_ONLY="yes"; shift ;;
     --select|--section|--target) SELECT="$2"; shift 2 ;;
+    --ignore|--exclude)    IGNORE="$2"; shift 2 ;;
     --proxy)               PROXY="$2"; shift 2 ;;
     --proxy-host)          PROXY_HOST="$2"; shift 2 ;;
     --proxy-port)          PROXY_PORT="$2"; shift 2 ;;
@@ -768,8 +772,9 @@ sys.stdout.write(''.join(doc))
 PYEOF
 }
 
-# Python helper: isolate regions matching selectors (tag/.class/#id), output their outer HTML.
-write_selector() {  # write_selector <path>;  invoked as: select_region.py <selectors...>
+# Python helper: KEEP only regions matching selectors (tag/.class/#id), or with
+# a leading --drop arg, REMOVE matching elements and keep the rest.
+write_selector() {  # write_selector <path>;  select_region.py [--drop] <selectors...>
   cat > "$1" <<'PYEOF'
 import sys, re
 
@@ -778,8 +783,13 @@ if hasattr(sys.stdin, 'buffer'):   # force UTF-8 I/O (Windows defaults to cp1252
     sys.stdin = io.TextIOWrapper(sys.stdin.buffer, encoding='utf-8', errors='replace')
     sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', errors='replace')
 html = sys.stdin.read()
+# --drop (first arg): REMOVE matching elements; otherwise KEEP only matches.
+argv = sys.argv[1:]
+drop = (argv[:1] == ['--drop'])
+if drop:
+    argv = argv[1:]
 # Accept comma- or space-separated selectors across all argv.
-raw = ' '.join(sys.argv[1:]).replace(',', ' ')
+raw = ' '.join(argv).replace(',', ' ')
 selectors = [s for s in raw.split() if s]
 
 VOID = set('img br hr input meta link source area base col embed param track wbr'.split())
@@ -833,15 +843,26 @@ out, i = [], 0
 while True:
     m = start_re.search(html, i)
     if not m:
+        if drop:
+            out.append(html[i:])      # keep trailing text after the last element
         break
     opentag, name = m.group(0), m.group(1).lower()
-    if name in VOID or opentag.rstrip().endswith('/>') or not any(matches(opentag, name, s) for s in selectors):
-        i = m.end(); continue
-    open_re = re.compile(r'(?is)<' + re.escape(name) + r'\b[^>]*>')
-    close = ('</' + name + '>').lower()
-    end = end_of_element(html, low, open_re, close, m.end())
-    out.append(html[m.start():end])   # keep the matched element's outer HTML
-    i = end                           # skip past so we don't re-match nested
+    hit = (name not in VOID) and (not opentag.rstrip().endswith('/>')) \
+          and any(matches(opentag, name, s) for s in selectors)
+    if drop:
+        if not hit:
+            out.append(html[i:m.end()]); i = m.end(); continue   # keep tag, scan inside
+        open_re = re.compile(r'(?is)<' + re.escape(name) + r'\b[^>]*>')
+        close = ('</' + name + '>').lower()
+        out.append(html[i:m.start()])                            # keep text before
+        i = end_of_element(html, low, open_re, close, m.end())   # drop the element
+    else:
+        if not hit:
+            i = m.end(); continue
+        open_re = re.compile(r'(?is)<' + re.escape(name) + r'\b[^>]*>')
+        close = ('</' + name + '>').lower()
+        end = end_of_element(html, low, open_re, close, m.end())
+        out.append(html[m.start():end]); i = end                 # keep the matched element
 
 sys.stdout.write(''.join(out))
 PYEOF
@@ -1091,14 +1112,17 @@ main() {
     log "Output mode: full visual copy (images slotted in)"
   fi
 
-  # Section targeting: scope link discovery to a region.
-  SELECT_ARGS=()
-  if [ -n "$SELECT" ]; then
+  # --select (keep only a region) and --ignore (drop matching elements) both use
+  # the selector helper; write it once if either is set, and split args glob-free.
+  SELECT_ARGS=(); IGNORE_ARGS=()
+  if [ -n "$SELECT" ] || [ -n "$IGNORE" ]; then
     write_selector "$SELECT_PY"
-    set -f   # split selectors with globbing off (so '*foo*' isn't expanded)
-    SELECT_ARGS=( $(printf '%s' "$SELECT" | tr ',' ' ') )
+    set -f
+    [ -n "$SELECT" ] && SELECT_ARGS=( $(printf '%s' "$SELECT" | tr ',' ' ') )
+    [ -n "$IGNORE" ] && IGNORE_ARGS=( $(printf '%s' "$IGNORE" | tr ',' ' ') )
     set +f
-    log "Targeting section(s): $SELECT (following only links found inside it)"
+    [ -n "$SELECT" ] && log "Targeting section(s): $SELECT (following only links found inside it)"
+    [ -n "$IGNORE" ] && log "Ignoring element(s): $IGNORE (removed before rendering)"
   fi
 
   [ -n "$AUTH_USER" ] && log "Basic-Auth enabled for host '$host' (user: $AUTH_USER)"
@@ -1112,7 +1136,7 @@ main() {
 
   # Verbose config dump for troubleshooting.
   dbg "config: browser=$CHROME"
-  dbg "config: python=$PYBIN  content_only=$CONTENT_ONLY  download_images=$DOWNLOAD_IMAGES  select='${SELECT}'"
+  dbg "config: python=$PYBIN  content_only=$CONTENT_ONLY  download_images=$DOWNLOAD_IMAGES  select='${SELECT}'  ignore='${IGNORE}'"
   dbg "config: auth_user=$([ -n "$AUTH_USER" ] && echo set || echo none)  auth_pass=$([ -n "$AUTH_PASS" ] && echo set || echo empty)  proxy=${PROXY_NOCREDS:-none}  proxy_user=$([ -n "$PROXY_USER" ] && echo "$PROXY_USER" || echo none)  insecure=$INSECURE"
   dbg "config: render_budget=${RENDER_BUDGET_MS}ms  delay=${DELAY}s  max_pages=$MAX_PAGES  depth=$MAX_DEPTH"
   dbg "config: chrome flags = ${CHROME_FLAGS[*]}"
@@ -1157,6 +1181,17 @@ main() {
       warn "  page fetch failed (exit $domrc) -- proxy/TLS/auth? re-run with --debug to see the curl/Chrome trace"
     elif [ "$domsz" -lt 200 ]; then
       warn "  page is nearly empty (${domsz} bytes) -- likely auth rejected (white page) or JS-only content; --debug shows the HTTP status"
+    fi
+
+    # --ignore: strip matching elements from the page up front, so they appear in
+    # neither the rendered PDF nor link discovery.
+    if [ -n "$IGNORE" ] && [ "$SKIP_CURRENT" != 1 ] && [ "$ABORT" != 1 ]; then
+      local cleaned; cleaned="$(mktemp 2>/dev/null || echo "$PROFILE_DIR/clean.$count")"
+      if run_spin "  ignoring elements" "$PYBIN" "$(pypath "$SELECT_PY")" --drop "${IGNORE_ARGS[@]}" < "$dom" > "$cleaned" 2>"$ERR_SINK" && [ -s "$cleaned" ]; then
+        mv "$cleaned" "$dom"
+      else
+        rm -f "$cleaned"   # on failure, keep the original page
+      fi
     fi
 
     # Skip this page's work if Ctrl-C asked to (interrupt guard).
