@@ -25,6 +25,11 @@
 #       --content-only     Reader mode: extract main content, drop chrome/styling (needs Python)
 #       --select SEL       Follow only links inside section(s) SEL: tag/.class/#id/bare (needs Python)
 #       --proxy URL        Route Chrome + curl/wget through a proxy (e.g. corporate)
+#       --proxy-host H     Proxy host (alt. to --proxy; env PROXY_HOST)
+#       --proxy-port P     Proxy port (env PROXY_PORT)
+#       --proxy-user U     Proxy username for an authenticated proxy (env PROXY_USER)
+#       --proxy-pass P     Proxy password (env PROXY_PASS). NOTE: proxy auth works
+#                          for curl/wget; headless Chrome can't take proxy creds via CLI.
 #       --insecure, -k     Ignore TLS certificate errors (QA / intercepting proxies)
 #       --debug            Show child stderr (Chrome, Python helpers) for troubleshooting
 #   -h, --help             Show this help and exit
@@ -47,7 +52,12 @@ CONTENT_ONLY="no"
 SELECT=""
 DEBUG="no"
 ERR_SINK="/dev/null"      # where child stderr goes; /dev/stderr under --debug
-PROXY=""                  # proxy for Chrome + curl (only when --proxy is given)
+PROXY=""                  # full proxy URL (--proxy); else assembled from the parts below
+PROXY_HOST="${PROXY_HOST:-}"   # --proxy-host / env PROXY_HOST
+PROXY_PORT="${PROXY_PORT:-}"   # --proxy-port / env PROXY_PORT
+PROXY_USER="${PROXY_USER:-}"   # --proxy-user / env PROXY_USER
+PROXY_PASS="${PROXY_PASS:-}"   # --proxy-pass / env PROXY_PASS
+PROXY_NOCREDS=""          # proxy host:port without creds (Chrome can't take proxy creds via CLI)
 INSECURE="no"             # --insecure: ignore TLS cert errors (QA / intercepting proxies)
 START_URL=""
 
@@ -199,6 +209,10 @@ while [ $# -gt 0 ]; do
     --content-only|--reader) CONTENT_ONLY="yes"; shift ;;
     --select|--section|--target) SELECT="$2"; shift 2 ;;
     --proxy)               PROXY="$2"; shift 2 ;;
+    --proxy-host)          PROXY_HOST="$2"; shift 2 ;;
+    --proxy-port)          PROXY_PORT="$2"; shift 2 ;;
+    --proxy-user)          PROXY_USER="$2"; shift 2 ;;
+    --proxy-pass)          PROXY_PASS="$2"; shift 2 ;;
     --insecure|-k)         INSECURE="yes"; shift ;;
     --debug)               DEBUG="yes"; shift ;;
     -h|--help)             usage ;;
@@ -249,8 +263,24 @@ case "$PLATFORM" in
 esac
 
 # ---------------------- download / unzip abstractions ------------------------
-# Build curl/wget options from --proxy / --insecure (no auto-detection).
+# Resolve the proxy from --proxy or the host/port/user/pass parts, then build
+# curl/wget options. PROXY_NOCREDS (host:port only) is what Chrome gets.
 setup_net() {
+  # Assemble a full proxy URL from parts when --proxy wasn't given.
+  if [ -z "$PROXY" ] && [ -n "$PROXY_HOST" ]; then
+    local hostport="$PROXY_HOST"
+    [ -n "$PROXY_PORT" ] && hostport="$PROXY_HOST:$PROXY_PORT"
+    if [ -n "$PROXY_USER" ]; then
+      PROXY="http://$(urlencode "$PROXY_USER"):$(urlencode "$PROXY_PASS")@$hostport"
+    else
+      PROXY="http://$hostport"
+    fi
+  fi
+  # Strip any credentials for Chrome (it can't use proxy creds from the CLI).
+  PROXY_NOCREDS="$PROXY"
+  case "$PROXY" in
+    *://*@*) PROXY_NOCREDS="$(printf '%s' "$PROXY" | sed -E 's#^([a-zA-Z]+://)[^@/]*@#\1#')" ;;
+  esac
   CURL_EXTRA=(); WGET_EXTRA=()
   [ -n "$PROXY" ] && { CURL_EXTRA+=(-x "$PROXY"); WGET_EXTRA+=(-e use_proxy=yes -e "https_proxy=$PROXY" -e "http_proxy=$PROXY"); }
   [ "$INSECURE" = "yes" ] && { CURL_EXTRA+=(-k); WGET_EXTRA+=(--no-check-certificate); }
@@ -935,7 +965,7 @@ build_flags() {
     *chrome-headless-shell*) : ;;
     *) CHROME_FLAGS=(--headless=new "${CHROME_FLAGS[@]}") ;;
   esac
-  [ -n "$PROXY" ] && CHROME_FLAGS+=("--proxy-server=$PROXY")
+  [ -n "$PROXY_NOCREDS" ] && CHROME_FLAGS+=("--proxy-server=$PROXY_NOCREDS")
   [ "$INSECURE" = "yes" ] && CHROME_FLAGS+=(--ignore-certificate-errors)
 }
 
@@ -1242,7 +1272,7 @@ main() {
   fi
 
   [ -n "$AUTH_USER" ] && log "Basic-Auth enabled for host '$host' (user: $AUTH_USER)"
-  [ -n "$PROXY" ] && log "Proxy: $PROXY"
+  [ -n "$PROXY" ] && log "Proxy: ${PROXY_NOCREDS:-$PROXY}${PROXY_USER:+ (authenticated)}"
   [ "$INSECURE" = "yes" ] && log "TLS certificate verification disabled (--insecure)"
 
   # ----- crawl -----
