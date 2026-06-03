@@ -53,51 +53,18 @@ output/<host>-<timestamp>/
    `chrome-headless-shell` into `./.cache/`. If that binary can't launch (e.g.
    missing system libraries on a minimal Linux box), it automatically falls back
    to any Chrome/Chromium found on your `PATH`.
-2. **Crawl** — From the start URL, following **same-host** links only, up to
-   `--max-pages` and `--depth`. By default it uses **body-first ordering** (see
-   below). Obvious asset links (images, CSS, JS, archives, media) are not
-   treated as pages. A `--delay` between requests keeps the crawl polite.
-3. **Render to PDF** — For each page Chrome prints to PDF. By default the script
-   first downloads the page's images and rewrites the page so those local copies
-   are embedded in place (see *Image handling*).
-4. **Merge** — If `pdfunite` (poppler) or `gs` (ghostscript) is present, all
+2. **Crawl** — Breadth-first from the start URL, following **same-host** links
+   only, up to `--max-pages` and `--depth`. Obvious asset links (images, CSS,
+   JS, archives, media) are not treated as pages. A `--delay` between requests
+   keeps the crawl polite. Use `--select` to follow only a chosen section's links.
+3. **Fetch** — Each page's HTML is fetched with Chrome `--dump-dom` (so
+   JavaScript runs), **except** for a Basic-Auth host, which is fetched with
+   `curl` (Chrome can't send Basic-Auth from the CLI — see *Authentication*).
+4. **Render to PDF** — A local snapshot is built from that HTML (images
+   downloaded and slotted back by id) and printed to PDF by Chrome.
+5. **Merge** — If `pdfunite` (poppler) or `gs` (ghostscript) is present, all
    per-page PDFs are merged into `_ALL_<host>.pdf`. Otherwise the individual
    PDFs are left as-is.
-
----
-
-## Crawl order (scraping priority)
-
-By default the crawler prioritises **content over site chrome** (header, nav,
-footer). On every page, links are split into two frontiers:
-
-- **Content** (high priority) — links in the page body, with header/nav/footer
-  regions removed (covers a header's nested `<nav>`, standalone navbars, and
-  footers).
-- **Nav** (low priority) — links inside the header/nav/footer regions.
-
-Those regions are detected both by **semantic tag** (`<header>`, `<nav>`,
-`<footer>`) and by **class/id keyword**, so non-semantic chrome like
-`<div class="site-footer">`, `<div id="footer">`, or `<div class="navbar">` is
-recognised too (keywords: `footer`, `navbar`, `masthead`).
-
-The content frontier is **always drained before** the nav frontier. So the
-crawler scrapes everything reachable through real content first; only when no
-content links remain does it descend into a header/nav link — and that page's
-own body links jump back to the front of the queue. A URL that appears in both
-the body and the nav is treated as content (it is never double-queued).
-
-The pages themselves are **always rendered to PDF in full** — header/nav are
-only removed for the purpose of deciding crawl order, never from the output.
-
-- This is the **default**. It needs Python; without Python the crawler falls
-  back to a plain breadth-first crawl (a notice is printed).
-- Disable it with `--no-body-first` for plain breadth-first crawling.
-- Detection is based on the semantic `<header>` and `<nav>` tags. Navbars built
-  from generic `<div class="navbar">` (no `<nav>`/`<header>`) are not detected.
-
-The per-page status line shows which frontier each page came from and how many
-are pending in each, e.g. `depth 1 (content) | queue 6c/3n`.
 
 ---
 
@@ -168,10 +135,10 @@ While running, the script keeps you informed of exactly what it's doing:
 - Each page prints a **header** with overall progress, queue size, image count
   so far, and elapsed time:
   ```
-  [*] [3/25] depth 1 (content) | queue 6c/3n | imgs 27 | 0:42 elapsed
+  [*] [3/25] depth 1 | queue 14 | imgs 27 | 0:42 elapsed
       https://example.com/about
   ```
-  (`6c/3n` = 6 content links and 3 nav links still pending.)
+  (`queue 14` = 14 URLs still pending.)
 - Long Chrome operations (loading a page, rendering the PDF) show a **live
   spinner with elapsed seconds** so it never looks frozen.
 - Image downloads show a running **counter** (`downloading image 5/12 ...`).
@@ -215,33 +182,33 @@ is skipped. Use `--no-images` to skip image downloading entirely.
 
 ---
 
-## Sites behind a login popup (HTTP Basic Auth)
+## Authentication (HTTP Basic Auth)
 
-If a site pops up a browser username/password dialog, that is **HTTP Basic
-Auth**. Supply credentials via environment variables — they are sent **only** to
-the start host, never to third-party hosts (e.g. CDNs):
+If a site pops up the browser's native username/password dialog, that's **HTTP
+Basic Auth**. Supply credentials via env vars (sent **only** to the start host):
 
 ```bash
 CRAWL_USER='alice' CRAWL_PASS='s3cret!' ./site-to-pdf.sh https://intranet.example.com
 ```
 
-| Variable     | Purpose                                  |
-|--------------|------------------------------------------|
-| `CRAWL_USER` | Username sent to the target host         |
-| `CRAWL_PASS` | Password sent to the target host         |
+> **Important:** pass them on the **same command line** as the script (or
+> `export` them first). A bare `CRAWL_USER=...` on its own line is a *shell*
+> variable that the script — a child process — does **not** inherit.
 
-Credentials are passed to Chrome (for page rendering and same-host subresources)
-and to `curl`/`wget` (for image downloads). Using environment variables keeps the
-password out of your shell history and out of this script's own arguments.
+**How it works:** headless Chrome can't send Basic-Auth from the command line,
+so for the Basic-Auth host the script fetches the page HTML with **curl `-u`**
+(which authenticates reliably), then renders a local snapshot. Images on that
+host are likewise fetched with curl + credentials.
 
-> **Note:** the password is still handed to the Chrome child process (embedded
-> in the URL) and to `curl`/`wget` (via `-u`), so it **can appear in the system
-> process list** (e.g. `ps`, `/proc/<pid>/cmdline`) while those children run.
-> Avoid using credential env vars on shared/multi-user machines.
+> **Caveat — JavaScript:** because the authed host is fetched with curl (no JS
+> engine), it works only for **server-rendered** pages. If the page's content or
+> navigation is injected by JavaScript, curl sees an empty shell. (`--debug`
+> shows the fetched byte size — a tiny number means a JS-only page.)
 
-> Note: this only covers HTTP Basic Auth (the native browser popup). Form-based
-> login pages (an HTML `<form>` with username/password fields) are **not**
-> supported.
+> **Security:** the password is handed to the curl child (`-u`), so it can appear
+> in the process list (`ps`) while that runs. Avoid on shared/multi-user hosts.
+
+> Only HTTP Basic Auth is supported — **not** HTML form logins.
 
 ---
 
@@ -262,12 +229,16 @@ Usage: ./site-to-pdf.sh [URL] [options]
 | `--no-merge`            | —                                    | Keep individual per-page PDFs only.                                |
 | `--use-system-chrome`   | off                                  | Skip the download; use a Chrome/Chromium found on `PATH`.          |
 | `--timeout MS`          | `12000`                              | Per-page render budget in milliseconds (raise for slow/lazy pages).|
-| `--no-images`           | off (images on)                      | Do not download images / skip slot-back.                           |
-| `--images-same-host`    | off (any host)                       | Only download images served by the start host.                     |
-| `--body-first`          | **on by default**                    | Crawl body/content links before `<header>`/`<nav>` links (needs Python). |
-| `--no-body-first`       | —                                    | Disable the priority above; plain breadth-first crawl.             |
-| `--content-only`, `--reader` | off                             | Reader mode: extract just the content into a clean PDF, dropping chrome & site styling (needs Python). |
-| `--select`, `--section`, `--target` `SEL` | off                | Follow only links inside section(s) matching `SEL` (tag, `.class`, `#id`, or bare word; comma-separated). Scopes crawling, not extraction. Needs Python. |
+| `--no-images`           | off (images on)                      | Do not download images; leave them as live URLs in the PDF.        |
+| `--content-only`, `--reader` | off                             | Reader mode: extract just the content into a clean PDF, dropping chrome & site styling. |
+| `--select`, `--section`, `--target` `SEL` | off                | Follow only links inside section(s) matching `SEL` (tag, `.class`, `#id`, or bare word; comma-separated). Scopes crawling, not extraction. |
+| `--proxy URL`           | off                                  | Route Chrome + curl/wget through a proxy (e.g. corporate).         |
+| `--proxy-host H`        | —                                    | Proxy host (alternative to `--proxy`; env `PROXY_HOST`).           |
+| `--proxy-port P`        | —                                    | Proxy port (env `PROXY_PORT`).                                     |
+| `--proxy-user U`        | —                                    | Proxy username for an authenticated proxy (env `PROXY_USER`).      |
+| `--proxy-pass P`        | —                                    | Proxy password (env `PROXY_PASS`). Used by curl/wget; Chrome can't take proxy creds via CLI. |
+| `--insecure`, `-k`      | off                                  | Ignore TLS certificate errors (QA / intercepting proxies).         |
+| `--debug`               | off                                  | Show child stderr (Chrome, Python, curl `-v`) for troubleshooting. |
 | `-h`, `--help`          | —                                    | Show help and exit.                                                |
 
 ### Environment variables
@@ -276,53 +247,37 @@ Usage: ./site-to-pdf.sh [URL] [options]
 |--------------|----------------------------------------------------------|
 | `CRAWL_USER` | HTTP Basic-Auth username for the target host.            |
 | `CRAWL_PASS` | HTTP Basic-Auth password for the target host.            |
+| `PROXY_HOST` / `PROXY_PORT` / `PROXY_USER` / `PROXY_PASS` | Authenticated-proxy parts (alternative to `--proxy`). |
+
+> Pass `CRAWL_USER`/`CRAWL_PASS` on the **same command line** as the script (or `export` them) — a bare `VAR=value` on its own line is a shell variable the script won't inherit.
 
 ---
 
 ## Dependencies
-
-The script downloads what it can and degrades gracefully otherwise.
 
 | Capability        | Auto-downloaded? | Tools used (first available wins)                         |
 |-------------------|------------------|-----------------------------------------------------------|
 | Headless browser  | ✅ yes           | Chrome for Testing `chrome-headless-shell` → system Chrome/Chromium |
 | Downloading       | uses what's there| `curl` → `wget`                                           |
 | Unzipping         | uses what's there| `unzip` → `python` `zipfile` → `tar`/bsdtar               |
-| Image slot-back   | n/a              | `python3` → `python` (optional; falls back to live render)|
-| Body-first order  | n/a              | `python3` → `python` (optional; falls back to plain BFS)  |
-| Content-only mode | n/a              | `python3` → `python` (optional; falls back to full copy)  |
-| Section targeting | n/a              | `python3` → `python` (optional; `--select` ignored if absent) |
+| Page/content/section processing | n/a | **Python 3** (`python3` → `python` → `py`) — **required** |
 | PDF merge         | ❌ no            | `pdfunite` (poppler) → `gs` (ghostscript) (optional)      |
 
-You need **at least** `curl` or `wget`, and **one** of `unzip` / `python` /
-`tar`. Everything else is optional and only enables extra features.
+**Required:** **Python 3**, plus **`curl` or `wget`**. (For the one-time browser
+unzip you also need one of `unzip` / `python` / `tar` — Python covers it.)
+Everything else is optional.
 
 ### Dependency safety checks
 
-The script checks dependencies before it needs them and never crashes with a
-raw error:
+The script verifies its requirements up front and never crashes with a raw
+error. If **Python** or a **downloader** is missing, you get a clean message
+naming the dependency and the **exact install command for your OS/package
+manager** (apt, dnf, yum, pacman, zypper, apk, brew, winget, choco, scoop, or a
+download link), then it exits. If no PDF **merger** is found, you're told how to
+install `poppler` and the per-page PDFs are kept.
 
-- **Hard requirements** (a downloader, and an unzip method when downloading the
-  browser) are verified up front. If one is missing, you get a clean message
-  naming the dependency and the **exact install command for your OS/package
-  manager** (apt, dnf, yum, pacman, zypper, apk, brew, winget, choco, scoop, or
-  a download link), then the script exits.
-- **Optional features that need Python** (image slot-back and body-first crawl
-  order) can't be auto-installed like the browser is. If Python is missing, the
-  script prints a single notice with the install command and **continues with a
-  safe fallback** (images rendered live by Chrome; plain breadth-first crawl).
-- **PDF merge**: if no merger is found, you're told how to install `poppler`
-  and the per-page PDFs are kept.
-
-Example when Python is unavailable:
-
-```
-[!] Python 3 was not found on PATH (and can't be installed automatically).
-    Some optional features are disabled. To enable them, install Python and re-run:
-        sudo apt-get install -y python3
-    - image slot-back -> images still appear in the PDF (rendered live by Chrome) and are saved under images/
-    - body-first crawl order -> falling back to a plain breadth-first crawl
-```
+> On Windows, the script skips the Microsoft Store **`python` alias stub** (it
+> only prints "Python was not found…") and picks a real interpreter.
 
 ### Installing the optional merge tools
 
@@ -355,19 +310,16 @@ brew install poppler
 ## Limitations & tips
 
 - **Same-host only**: the crawler does not follow links to other domains
-  (images may still be downloaded cross-host unless `--images-same-host`).
-- **Chrome detection** (for body-first order) uses the semantic `<header>`,
-  `<nav>`, and `<footer>` tags *plus* class/id keywords (`footer`, `navbar`,
-  `masthead`). A header/footer/navbar built from a plain `<div>` with none of
-  those keywords in its class/id won't be recognised. Use `--no-body-first` if a
-  site's structure confuses the ordering.
-- **No JavaScript-driven navigation**: links are discovered from the rendered
-  DOM's `<a href>`; routes only reachable by clicking JS controls won't be found.
+  (images are still downloaded from wherever they're hosted).
+- **`--select` matching** is substring-based on tag / `.class` / `#id` (a bare
+  word also matches a class/id). So `--select nav` also matches `navbar`. No CSS
+  combinators (e.g. `.sidebar a`).
+- **JavaScript**: normal pages are fetched with Chrome `--dump-dom`, so JS runs.
+  But a **Basic-Auth host** is fetched with curl (no JS) — so it must be
+  server-rendered there; a JS-only page/nav yields an empty shell.
 - **Lazy-loaded images**: if some images are missing from a PDF, increase the
   render budget, e.g. `--timeout 25000`.
-- **CSS `background-image`s**: these render into the PDF but are *not* saved into
-  the `images/` archive (only `<img>`/`srcset`/image links are captured).
-- **Form logins are not supported** — only the HTTP Basic-Auth popup.
+- **Form logins are not supported** — only HTTP Basic Auth.
 - Be responsible: only crawl sites you are authorized to, and mind their
   `robots.txt` and terms of service.
 
@@ -379,18 +331,21 @@ brew install poppler
 # Deep crawl, single merged PDF, slower to be gentle on the server
 ./site-to-pdf.sh https://docs.example.com -n 200 -d 4 --delay 1.5 --merge
 
-# Authenticated intranet, only embed images from the same host
+# Authenticated site behind a corporate proxy (reader mode)
 CRAWL_USER=alice CRAWL_PASS='pw' \
-  ./site-to-pdf.sh https://intranet.example.com --images-same-host
+  ./site-to-pdf.sh https://intranet.example.com/docs/ \
+  --content-only --proxy http://proxy.corp:8080 --insecure
+
+# Authenticated proxy via separate parts
+CRAWL_USER=alice CRAWL_PASS='pw' \
+PROXY_HOST=proxy.corp PROXY_PORT=8080 PROXY_USER=alice PROXY_PASS=pw \
+  ./site-to-pdf.sh https://intranet.example.com/docs/ --content-only --insecure
 
 # Just the PDFs, no image downloading, into a chosen folder
 ./site-to-pdf.sh https://example.com --no-images -o ./pdfs
 
 # Reuse an already-installed Chrome instead of downloading one
 ./site-to-pdf.sh https://example.com --use-system-chrome
-
-# Plain breadth-first crawl (disable body-first scraping priority)
-./site-to-pdf.sh https://example.com --no-body-first
 
 # Reader mode: clean content-only PDFs (no header/nav/footer, no site styling)
 ./site-to-pdf.sh https://example.com --content-only
