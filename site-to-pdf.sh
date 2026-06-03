@@ -513,6 +513,10 @@ except ImportError:                      # Python 2
 clean_base = sys.argv[1]   # no credentials -> used for image urls / manifest
 cred_base  = sys.argv[2]   # may carry user:pass@ -> used for css/js/etc.
 mapping    = sys.argv[3]
+if hasattr(sys.stdin, 'buffer'):   # force UTF-8 I/O (Windows defaults to cp1252)
+    import io
+    sys.stdin = io.TextIOWrapper(sys.stdin.buffer, encoding='utf-8', errors='replace')
+    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', errors='replace')
 html = sys.stdin.read()
 
 imgmap, order, counter = {}, [], [0]
@@ -590,6 +594,10 @@ write_stripper() {  # write_stripper <tags...> -- <class/id keywords...>
   cat > "$1" <<'PYEOF'
 import sys, re
 
+if hasattr(sys.stdin, 'buffer'):   # force UTF-8 I/O (Windows defaults to cp1252)
+    import io
+    sys.stdin = io.TextIOWrapper(sys.stdin.buffer, encoding='utf-8', errors='replace')
+    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', errors='replace')
 html = sys.stdin.read()
 args = sys.argv[1:]
 if '--' in args:
@@ -672,6 +680,10 @@ clean_base   = sys.argv[1]
 mapping_path = sys.argv[2]
 with_images  = (len(sys.argv) > 3 and sys.argv[3] == '1')
 
+if hasattr(sys.stdin, 'buffer'):   # force UTF-8 I/O (Windows defaults to cp1252)
+    import io
+    sys.stdin = io.TextIOWrapper(sys.stdin.buffer, encoding='utf-8', errors='replace')
+    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', errors='replace')
 html = sys.stdin.read()
 html = re.sub(r'(?is)<!--.*?-->', '', html)              # strip comments
 
@@ -845,6 +857,10 @@ write_selector() {  # write_selector <path>;  invoked as: select_region.py <sele
   cat > "$1" <<'PYEOF'
 import sys, re
 
+if hasattr(sys.stdin, 'buffer'):   # force UTF-8 I/O (Windows defaults to cp1252)
+    import io
+    sys.stdin = io.TextIOWrapper(sys.stdin.buffer, encoding='utf-8', errors='replace')
+    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', errors='replace')
 html = sys.stdin.read()
 # Accept comma- or space-separated selectors across all argv.
 raw = ' '.join(sys.argv[1:]).replace(',', ' ')
