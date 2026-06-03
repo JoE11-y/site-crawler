@@ -1098,14 +1098,18 @@ dump_dom() {  # dump_dom <url>
     "$(auth_url "$1")" 2>"$ERR_SINK"
 }
 
-# Extract href values from <a> anchors only (skips <link>/<script> assets).
+# Extract href values: double-quoted, single-quoted, OR unquoted (some sites,
+# like this one, emit href=/path with no quotes). Non-page assets (css/js/...)
+# are dropped later by enqueue_links' filter, so we needn't anchor to <a>.
+# `s/^[^=]*=.../` strips the "href=" prefix without a case-sensitive sed flag.
 extract_links() {  # extract_links <base_url> <dom_file>
   local dom="$2"
-  # Two greps so '=' inside query strings and case don't break extraction.
-  grep -oiE '<a\b[^>]*href[[:space:]]*=[[:space:]]*"[^"]*"' "$dom" 2>/dev/null \
-    | grep -oE '"[^"]*"$' | sed -E 's/^"//; s/"$//'
-  grep -oiE "<a\b[^>]*href[[:space:]]*=[[:space:]]*'[^']*'" "$dom" 2>/dev/null \
-    | grep -oE "'[^']*'\$" | sed -E "s/^'//; s/'\$//"
+  grep -oiE 'href[[:space:]]*=[[:space:]]*"[^"]*"' "$dom" 2>/dev/null \
+    | sed -E 's/^[^=]*=[[:space:]]*"//; s/"$//'
+  grep -oiE "href[[:space:]]*=[[:space:]]*'[^']*'" "$dom" 2>/dev/null \
+    | sed -E "s/^[^=]*=[[:space:]]*'//; s/'\$//"
+  grep -oiE 'href[[:space:]]*=[[:space:]]*[^[:space:]"'"'"'>]+' "$dom" 2>/dev/null \
+    | sed -E 's/^[^=]*=[[:space:]]*//'
 }
 
 # Extract image URLs from a page: <img src>/<img srcset> and image-file hrefs.
